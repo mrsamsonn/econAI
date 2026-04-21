@@ -432,6 +432,68 @@ function attachTimestamps(points) {
   }));
 }
 
+function toIndex100(points) {
+  const valid = points.filter((p) => Number.isFinite(Number(p.value)));
+  if (!valid.length) return [];
+  const base = Number(valid[0].value);
+  if (!Number.isFinite(base) || base === 0) return [];
+  return valid.map((p) => ({
+    date: p.date,
+    value: (Number(p.value) / base) * 100,
+  }));
+}
+
+function mergeSeriesOnDate(pointsA, pointsB, keyA = "a", keyB = "b") {
+  const mapB = new Map(pointsB.map((p) => [p.date, Number(p.value)]));
+  const merged = [];
+  for (const p of pointsA) {
+    const a = Number(p.value);
+    const b = mapB.get(p.date);
+    if (!Number.isFinite(a) || !Number.isFinite(b)) continue;
+    merged.push({
+      date: p.date,
+      [keyA]: a,
+      [keyB]: b,
+      ts: Date.parse(`${p.date}T12:00:00Z`),
+    });
+  }
+  return merged;
+}
+
+function toYoY(points) {
+  const out = [];
+  for (let i = 12; i < points.length; i += 1) {
+    const curr = Number(points[i].value);
+    const prev = Number(points[i - 12].value);
+    if (!Number.isFinite(curr) || !Number.isFinite(prev) || prev === 0) continue;
+    out.push({
+      date: points[i].date,
+      value: ((curr - prev) / prev) * 100,
+    });
+  }
+  return out;
+}
+
+function computeSahmProxy(unratePoints) {
+  const out = [];
+  for (let i = 0; i < unratePoints.length; i += 1) {
+    const curr = Number(unratePoints[i].value);
+    if (!Number.isFinite(curr)) continue;
+    const start = Math.max(0, i - 11);
+    const windowVals = unratePoints
+      .slice(start, i + 1)
+      .map((p) => Number(p.value))
+      .filter((v) => Number.isFinite(v));
+    if (!windowVals.length) continue;
+    const min12 = Math.min(...windowVals);
+    out.push({
+      date: unratePoints[i].date,
+      value: curr - min12,
+    });
+  }
+  return out;
+}
+
 function TrendChart({ title, data, yLabel, onExpand, preference, glossaryKey }) {
   const domain = getDynamicDomain(data.map((d) => Number(d.value)));
   const tip = glossaryTip(glossaryKey);
@@ -478,6 +540,149 @@ function TrendChart({ title, data, yLabel, onExpand, preference, glossaryKey }) 
       <div className="sub">{yLabel}</div>
       <div className="metric-hint">{preference}</div>
     </div>
+  );
+}
+
+function ContributionWaterfall({ components = [] }) {
+  let running = 50;
+  const top = [...components].sort((a, b) => Math.abs(Number(b.delta || 0)) - Math.abs(Number(a.delta || 0))).slice(0, 10);
+  const rows = top.map((c) => {
+    const delta = Number(c.delta || 0);
+    const from = running;
+    running += delta;
+    return { name: c.name, delta, from, to: running };
+  });
+  const maxAbs = Math.max(1, ...rows.map((r) => Math.abs(r.delta)));
+
+  return (
+    <Card title="Bias Contribution Waterfall" className="card-insight">
+      <p className="sub">Largest drivers from baseline score 50 (current pull).</p>
+      <div className="insight-explain">
+        <strong>What this means:</strong> Green bars are pushing the US economy bias up; red bars are pulling it down.
+        Longer bars have bigger impact on the current score.
+      </div>
+      <div className="waterfall-list">
+        {rows.map((r) => (
+          <div key={r.name} className="waterfall-row">
+            <div className="waterfall-name">{r.name}</div>
+            <div className="waterfall-bar-track">
+              <div
+                className={`waterfall-bar ${r.delta >= 0 ? "waterfall-bar-pos" : "waterfall-bar-neg"}`}
+                style={{ width: `${(Math.abs(r.delta) / maxAbs) * 100}%` }}
+                title={`${r.from.toFixed(1)} → ${r.to.toFixed(1)}`}
+              />
+            </div>
+            <div className={`waterfall-delta ${r.delta >= 0 ? "delta-pos" : "delta-neg"}`}>{formatSigned(r.delta, 1)}</div>
+          </div>
+        ))}
+      </div>
+    </Card>
+  );
+}
+
+function InflationPolicyChart({ data = [] }) {
+  const domain = getDynamicDomain(data.flatMap((d) => [Number(d.cpiYoY), Number(d.fedFunds), Number(d.realRate)]));
+  return (
+    <Card title="Policy Stance (Inflation vs Rates)" className="card-insight">
+      <p className="sub">Tracks CPI YoY, Fed Funds, and implied real policy rate (Fed Funds - CPI YoY).</p>
+      <div className="insight-explain">
+        <div><strong>Why this matters</strong> — Policy stance affects borrowing costs, housing demand, hiring, and market valuations.</div>
+        <div><strong>How to read</strong> — Blue = inflation (CPI YoY), green = policy rate (Fed Funds), orange = real policy rate (Fed Funds - inflation).</div>
+        <div><strong>Usually healthier</strong> — Inflation trends down toward target while real rate stays modestly positive.</div>
+        <div><strong>Higher risk</strong> — Deeply negative real rate with high inflation (too loose), or very high positive real rate with weak growth (too tight).</div>
+      </div>
+      <div className="insight-legend">
+        <span className="insight-dot insight-dot--a" /> CPI YoY (%)
+        <span className="insight-dot insight-dot--b" /> Fed Funds (%)
+        <span className="insight-dot insight-dot--c" /> Real policy rate (%)
+      </div>
+      <div className="chart-wrap">
+        <ResponsiveContainer width="100%" height={170}>
+          <LineChart data={data}>
+            <CartesianGrid strokeDasharray="3 3" stroke="#223046" />
+            <XAxis
+              dataKey="ts"
+              type="number"
+              domain={["dataMin", "dataMax"]}
+              stroke="#9cb0cb"
+              tick={{ fontSize: 10 }}
+              tickFormatter={formatDateFromTs}
+              minTickGap={24}
+            />
+            <YAxis
+              domain={domain}
+              stroke="#9cb0cb"
+              tick={{ fontSize: 10 }}
+              tickFormatter={formatNumber}
+              width={52}
+            />
+            <Tooltip
+              {...CHART_TOOLTIP_PROPS}
+              cursor={CHART_LINE_TOOLTIP_CURSOR}
+              labelFormatter={formatDateFromTs}
+              formatter={(v) => `${formatNumber(v)}%`}
+            />
+            <Line type="monotone" dataKey="cpiYoY" stroke="#6ba8ff" strokeWidth={2} dot={false} />
+            <Line type="monotone" dataKey="fedFunds" stroke="#7ce3b1" strokeWidth={2} dot={false} />
+            <Line type="monotone" dataKey="realRate" stroke="#f0a84b" strokeWidth={2} dot={false} />
+          </LineChart>
+        </ResponsiveContainer>
+      </div>
+    </Card>
+  );
+}
+
+function LaborStressChart({ data = [] }) {
+  const leftDomain = getDynamicDomain(data.map((d) => Number(d.unrate)));
+  const rightDomain = getDynamicDomain(data.map((d) => Number(d.sahmProxy)));
+  return (
+    <Card title="Labor Stress Tracker" className="card-insight">
+      <p className="sub">Unemployment rate with Sahm-style trigger proxy (UNRATE minus 12-month low).</p>
+      <div className="insight-explain">
+        <div><strong>Why this matters</strong> — Labor drives household income, spending strength, and recession risk.</div>
+        <div><strong>How to read</strong> — Blue = unemployment rate, orange = Sahm-style stress proxy (current unemployment minus 12-month low).</div>
+        <div><strong>Usually healthier</strong> — Stable/low unemployment and orange near zero.</div>
+        <div><strong>Higher risk</strong> — Both lines rising; orange moving toward ~0.5 percentage points is a classic warning zone.</div>
+      </div>
+      <div className="insight-legend">
+        <span className="insight-dot insight-dot--a" /> Unemployment rate (%)
+        <span className="insight-dot insight-dot--c" /> Sahm proxy (pp)
+      </div>
+      <div className="chart-wrap">
+        <ResponsiveContainer width="100%" height={170}>
+          <LineChart data={data}>
+            <CartesianGrid strokeDasharray="3 3" stroke="#223046" />
+            <XAxis
+              dataKey="ts"
+              type="number"
+              domain={["dataMin", "dataMax"]}
+              stroke="#9cb0cb"
+              tick={{ fontSize: 10 }}
+              tickFormatter={formatDateFromTs}
+              minTickGap={24}
+            />
+            <YAxis yAxisId="left" domain={leftDomain} stroke="#6ba8ff" tick={{ fontSize: 10 }} tickFormatter={formatNumber} width={52} />
+            <YAxis
+              yAxisId="right"
+              orientation="right"
+              domain={rightDomain}
+              stroke="#f0a84b"
+              tick={{ fontSize: 10 }}
+              tickFormatter={formatNumber}
+              width={52}
+            />
+            <Tooltip
+              {...CHART_TOOLTIP_PROPS}
+              cursor={CHART_LINE_TOOLTIP_CURSOR}
+              labelFormatter={formatDateFromTs}
+              formatter={(v) => `${formatNumber(v)}%`}
+            />
+            <Line yAxisId="left" type="monotone" dataKey="unrate" stroke="#6ba8ff" strokeWidth={2} dot={false} />
+            <Line yAxisId="right" type="monotone" dataKey="sahmProxy" stroke="#f0a84b" strokeWidth={2} dot={false} />
+          </LineChart>
+        </ResponsiveContainer>
+      </div>
+    </Card>
   );
 }
 
@@ -780,6 +985,35 @@ export default function App() {
       activity: pick(activityMetrics, "HOUST", "Housing starts trend"),
     };
   }, [interestRates, taxMetrics, activityMetrics, timeline]);
+
+  const inflationPolicyData = useMemo(() => {
+    const cpiRow = economy.find((r) => r.series_id === "CPIAUCSL");
+    const fedRow = economy.find((r) => r.series_id === "FEDFUNDS");
+    const cpiHistFull = normalizeHistoryRows(cpiRow?.history);
+    const fedHistFull = normalizeHistoryRows(fedRow?.history);
+    // Compute YoY from full CPI history, then apply timeline; otherwise 1Y can go empty.
+    const cpiYoY = filterByTimeline(toYoY(cpiHistFull));
+    const fedHist = filterByTimeline(fedHistFull);
+    const merged = mergeSeriesOnDate(cpiYoY, fedHist, "cpiYoY", "fedFunds").map((r) => ({
+      ...r,
+      realRate: Number(r.fedFunds) - Number(r.cpiYoY),
+    }));
+    if (merged.length >= 2) return merged;
+    // Sparse fallback for short windows: keep the latest observations so chart still renders.
+    const cpiYoYRecent = toYoY(cpiHistFull).slice(-3);
+    const fedRecent = fedHistFull.slice(-3);
+    return mergeSeriesOnDate(cpiYoYRecent, fedRecent, "cpiYoY", "fedFunds").map((r) => ({
+      ...r,
+      realRate: Number(r.fedFunds) - Number(r.cpiYoY),
+    }));
+  }, [economy, timeline]);
+
+  const laborStressData = useMemo(() => {
+    const unrateRow = economy.find((r) => r.series_id === "UNRATE");
+    const unrateHist = filterByTimeline(normalizeHistoryRows(unrateRow?.history));
+    const sahm = computeSahmProxy(unrateHist);
+    return mergeSeriesOnDate(unrateHist, sahm, "unrate", "sahmProxy");
+  }, [economy, timeline]);
 
   const gdpBars = (globalCompare.gdp_usd_current || []).map((row) => ({
     country: row.country,
@@ -1217,6 +1451,12 @@ export default function App() {
             />
           )}
         </Card>
+      </section>
+
+      <section className="insight-visuals-row" aria-label="US economy visualizations">
+        <ContributionWaterfall components={data?.us_economy_direction?.components || []} />
+        <InflationPolicyChart data={inflationPolicyData} />
+        <LaborStressChart data={laborStressData} />
       </section>
 
       <section className="below-section">

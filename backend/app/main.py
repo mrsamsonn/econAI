@@ -251,6 +251,27 @@ def _safe_float(value: Any) -> Optional[float]:
         return None
 
 
+def _freshness_multiplier(observed_date: Optional[str], now_utc: datetime) -> float:
+    """
+    Down-weight stale observations so slow-frequency series don't dominate a live pulse.
+    """
+    if not observed_date:
+        return 1.0
+    dt = pd.to_datetime(observed_date, errors="coerce", utc=True)
+    if pd.isna(dt):
+        return 1.0
+    age_days = max(0.0, (now_utc - dt.to_pydatetime()).total_seconds() / 86400.0)
+    if age_days <= 45:
+        return 1.0
+    if age_days <= 120:
+        return 0.85
+    if age_days <= 240:
+        return 0.65
+    if age_days <= 365:
+        return 0.45
+    return 0.3
+
+
 def _yf_flatten_columns(df: pd.DataFrame) -> pd.DataFrame:
     if isinstance(df.columns, pd.MultiIndex):
         out = df.copy()
@@ -317,6 +338,7 @@ async def fetch_market_snapshot(symbol: str, label: str) -> Dict[str, Any]:
             "symbol": symbol,
             "label": label,
             "latest": latest_close,
+            "latest_date": str(close_df.iloc[-1]["date"]) if "date" in close_df.columns else None,
             "change": change,
             "pct_change": pct_change,
             # Full daily history (e.g. SPY ~8.3k rows since 1993); needed for "ALL" timeline in UI.
@@ -609,6 +631,7 @@ def _interest_rate_pulse(rows: List[Dict[str, Any]], add_component) -> None:
                 1.6,
                 f"{label} fell {abs(ch):.2f} pts vs prior observation",
                 bucket="rates",
+                observed_date=row.get("latest_date"),
             )
         elif ch > thr:
             add_component(
@@ -616,6 +639,7 @@ def _interest_rate_pulse(rows: List[Dict[str, Any]], add_component) -> None:
                 -1.6,
                 f"{label} rose {ch:.2f} pts vs prior observation",
                 bucket="rates",
+                observed_date=row.get("latest_date"),
             )
 
 
@@ -630,25 +654,56 @@ def _tax_fiscal_pulse(rows: List[Dict[str, Any]], add_component) -> None:
                 3.2,
                 "Surplus improved / deficit narrowed vs prior print",
                 bucket="fiscal",
+                observed_date=bal.get("latest_date"),
             )
         elif ch < -0.08:
-            add_component("Fiscal balance (% GDP)", -3.2, "Deficit widened vs prior print", bucket="fiscal")
+            add_component(
+                "Fiscal balance (% GDP)",
+                -3.2,
+                "Deficit widened vs prior print",
+                bucket="fiscal",
+                observed_date=bal.get("latest_date"),
+            )
 
     debt = _fred_row(rows, "GFDEGDQ188S")
     if debt.get("change") is not None:
         ch = float(debt["change"])
         if ch > 0.15:
-            add_component("Public debt (% GDP)", -2.4, "Debt-to-GDP moved up vs prior observation", bucket="fiscal")
+            add_component(
+                "Public debt (% GDP)",
+                -2.4,
+                "Debt-to-GDP moved up vs prior observation",
+                bucket="fiscal",
+                observed_date=debt.get("latest_date"),
+            )
         elif ch < -0.12:
-            add_component("Public debt (% GDP)", 2.0, "Debt-to-GDP improved vs prior observation", bucket="fiscal")
+            add_component(
+                "Public debt (% GDP)",
+                2.0,
+                "Debt-to-GDP improved vs prior observation",
+                bucket="fiscal",
+                observed_date=debt.get("latest_date"),
+            )
 
     rec = _fred_row(rows, "FYFRGDA188S")
     if rec.get("change") is not None:
         ch = float(rec["change"])
         if ch > 0.12:
-            add_component("Federal receipts (% GDP)", 1.8, "Receipts share of GDP rose vs prior print", bucket="fiscal")
+            add_component(
+                "Federal receipts (% GDP)",
+                1.8,
+                "Receipts share of GDP rose vs prior print",
+                bucket="fiscal",
+                observed_date=rec.get("latest_date"),
+            )
         elif ch < -0.12:
-            add_component("Federal receipts (% GDP)", -1.8, "Receipts share of GDP fell vs prior print", bucket="fiscal")
+            add_component(
+                "Federal receipts (% GDP)",
+                -1.8,
+                "Receipts share of GDP fell vs prior print",
+                bucket="fiscal",
+                observed_date=rec.get("latest_date"),
+            )
 
 
 def _activity_pulse(rows: List[Dict[str, Any]], add_component) -> None:
@@ -656,25 +711,61 @@ def _activity_pulse(rows: List[Dict[str, Any]], add_component) -> None:
     if sent.get("change") is not None:
         ch = float(sent["change"])
         if ch > 1.0:
-            add_component("Consumer sentiment", 4.5, "UMich sentiment improved vs prior month", bucket="activity")
+            add_component(
+                "Consumer sentiment",
+                4.5,
+                "UMich sentiment improved vs prior month",
+                bucket="activity",
+                observed_date=sent.get("latest_date"),
+            )
         elif ch < -1.0:
-            add_component("Consumer sentiment", -4.5, "UMich sentiment softened vs prior month", bucket="activity")
+            add_component(
+                "Consumer sentiment",
+                -4.5,
+                "UMich sentiment softened vs prior month",
+                bucket="activity",
+                observed_date=sent.get("latest_date"),
+            )
 
     retail = _fred_row(rows, "RSXFS")
     if retail.get("pct_change") is not None:
         pc = float(retail["pct_change"])
         if pc > 0.35:
-            add_component("Retail sales (ex-auto)", 3.5, "Retail sales rose vs prior month", bucket="activity")
+            add_component(
+                "Retail sales (ex-auto)",
+                3.5,
+                "Retail sales rose vs prior month",
+                bucket="activity",
+                observed_date=retail.get("latest_date"),
+            )
         elif pc < -0.35:
-            add_component("Retail sales (ex-auto)", -3.5, "Retail sales fell vs prior month", bucket="activity")
+            add_component(
+                "Retail sales (ex-auto)",
+                -3.5,
+                "Retail sales fell vs prior month",
+                bucket="activity",
+                observed_date=retail.get("latest_date"),
+            )
 
     starts = _fred_row(rows, "HOUST")
     if starts.get("change") is not None:
         ch = float(starts["change"])
         if ch > 2.5:
-            add_component("Housing starts", 3.8, "Starts picked up vs prior month (SAAR units)", bucket="activity")
+            add_component(
+                "Housing starts",
+                3.8,
+                "Starts picked up vs prior month (SAAR units)",
+                bucket="activity",
+                observed_date=starts.get("latest_date"),
+            )
         elif ch < -2.5:
-            add_component("Housing starts", -3.8, "Starts cooled vs prior month (SAAR units)", bucket="activity")
+            add_component(
+                "Housing starts",
+                -3.8,
+                "Starts cooled vs prior month (SAAR units)",
+                bucket="activity",
+                observed_date=starts.get("latest_date"),
+            )
 
 
 def compute_us_economy_direction(
@@ -692,6 +783,7 @@ def compute_us_economy_direction(
     """
     components: List[Dict[str, Any]] = []
     score = 50.0
+    now_utc = datetime.now(timezone.utc)
     bucket_totals: Dict[str, float] = {}
     bucket_caps: Dict[str, float] = {
         "growth_labor": 26.0,
@@ -703,58 +795,134 @@ def compute_us_economy_direction(
         "activity": 10.0,
     }
 
-    def add_component(name: str, delta: float, detail: str, bucket: str = "growth_labor") -> None:
+    def add_component(
+        name: str,
+        delta: float,
+        detail: str,
+        bucket: str = "growth_labor",
+        observed_date: Optional[str] = None,
+    ) -> None:
         nonlocal score
         cap = bucket_caps.get(bucket, 8.0)
         running = bucket_totals.get(bucket, 0.0)
+        freshness = _freshness_multiplier(observed_date, now_utc)
+        adjusted = float(delta) * freshness
         room_up = cap - running
         room_down = -cap - running
-        applied = max(room_down, min(room_up, float(delta)))
+        applied = max(room_down, min(room_up, adjusted))
         if abs(applied) < 1e-9:
             return
         bucket_totals[bucket] = running + applied
         score += applied
-        components.append({"name": name, "delta": round(applied, 1), "detail": detail})
+        components.append(
+            {
+                "name": name,
+                "delta": round(applied, 1),
+                "detail": detail,
+                "freshness": round(freshness, 2),
+                "bucket": bucket,
+            }
+        )
 
     payems = _fred_row(economy, "PAYEMS")
     if payems.get("change") is not None:
         ch = float(payems["change"])
         if ch > 0:
-            add_component("Payrolls (PAYEMS)", 7, "Payrolls rose vs prior print", bucket="growth_labor")
+            add_component(
+                "Payrolls (PAYEMS)",
+                7,
+                "Payrolls rose vs prior print",
+                bucket="growth_labor",
+                observed_date=payems.get("latest_date"),
+            )
         elif ch < 0:
-            add_component("Payrolls (PAYEMS)", -7, "Payrolls fell vs prior print", bucket="growth_labor")
+            add_component(
+                "Payrolls (PAYEMS)",
+                -7,
+                "Payrolls fell vs prior print",
+                bucket="growth_labor",
+                observed_date=payems.get("latest_date"),
+            )
 
     unrate = _fred_row(economy, "UNRATE")
     if unrate.get("change") is not None:
         ch = float(unrate["change"])
         if ch < 0:
-            add_component("Unemployment (UNRATE)", 7, "Unemployment rate edged down", bucket="growth_labor")
+            add_component(
+                "Unemployment (UNRATE)",
+                7,
+                "Unemployment rate edged down",
+                bucket="growth_labor",
+                observed_date=unrate.get("latest_date"),
+            )
         elif ch > 0:
-            add_component("Unemployment (UNRATE)", -7, "Unemployment rate rose", bucket="growth_labor")
+            add_component(
+                "Unemployment (UNRATE)",
+                -7,
+                "Unemployment rate rose",
+                bucket="growth_labor",
+                observed_date=unrate.get("latest_date"),
+            )
 
     icsa = _fred_row(economy, "ICSA")
     if icsa.get("change") is not None:
         ch = float(icsa["change"])
         if ch < 0:
-            add_component("Jobless claims (ICSA)", 4.5, "Initial claims declined vs prior week", bucket="growth_labor")
+            add_component(
+                "Jobless claims (ICSA)",
+                4.5,
+                "Initial claims declined vs prior week",
+                bucket="growth_labor",
+                observed_date=icsa.get("latest_date"),
+            )
         elif ch > 0:
-            add_component("Jobless claims (ICSA)", -4.5, "Initial claims rose vs prior week", bucket="growth_labor")
+            add_component(
+                "Jobless claims (ICSA)",
+                -4.5,
+                "Initial claims rose vs prior week",
+                bucket="growth_labor",
+                observed_date=icsa.get("latest_date"),
+            )
 
     gdp = _fred_row(economy, "GDPC1")
     if gdp.get("change") is not None:
         ch = float(gdp["change"])
         if ch > 0:
-            add_component("Real GDP (GDPC1)", 8.5, "Real GDP rose vs prior quarter", bucket="growth_labor")
+            add_component(
+                "Real GDP (GDPC1)",
+                8.5,
+                "Real GDP rose vs prior quarter",
+                bucket="growth_labor",
+                observed_date=gdp.get("latest_date"),
+            )
         elif ch < 0:
-            add_component("Real GDP (GDPC1)", -10.0, "Real GDP contracted vs prior quarter", bucket="growth_labor")
+            add_component(
+                "Real GDP (GDPC1)",
+                -10.0,
+                "Real GDP contracted vs prior quarter",
+                bucket="growth_labor",
+                observed_date=gdp.get("latest_date"),
+            )
 
     cpi = _fred_row(economy, "CPIAUCSL")
     if cpi.get("pct_change") is not None:
         pc = float(cpi["pct_change"])
         if pc > 0.35:
-            add_component("CPI (CPIAUCSL)", -4.5, "MoM CPI increase looks firm", bucket="inflation")
+            add_component(
+                "CPI (CPIAUCSL)",
+                -4.5,
+                "MoM CPI increase looks firm",
+                bucket="inflation",
+                observed_date=cpi.get("latest_date"),
+            )
         elif pc < -0.05:
-            add_component("CPI (CPIAUCSL)", 3.0, "MoM CPI cooled vs prior month", bucket="inflation")
+            add_component(
+                "CPI (CPIAUCSL)",
+                3.0,
+                "MoM CPI cooled vs prior month",
+                bucket="inflation",
+                observed_date=cpi.get("latest_date"),
+            )
 
     y10 = treasury_yields.get("10y")
     y2 = treasury_yields.get("2y")
@@ -766,34 +934,72 @@ def compute_us_economy_direction(
                 -10.0,
                 "Curve inverted — classic late-cycle signal",
                 bucket="financial",
+                observed_date=treasury_yields.get("record_date"),
             )
         elif spread < 0.25:
-            add_component("Yield curve (10Y − 2Y)", -3.5, "Curve is flat — growth doubts", bucket="financial")
+            add_component(
+                "Yield curve (10Y − 2Y)",
+                -3.5,
+                "Curve is flat — growth doubts",
+                bucket="financial",
+                observed_date=treasury_yields.get("record_date"),
+            )
         elif spread < 0.75:
-            add_component("Yield curve (10Y − 2Y)", 3.5, "Curve modestly positive", bucket="financial")
+            add_component(
+                "Yield curve (10Y − 2Y)",
+                3.5,
+                "Curve modestly positive",
+                bucket="financial",
+                observed_date=treasury_yields.get("record_date"),
+            )
         else:
             add_component(
                 "Yield curve (10Y − 2Y)",
                 7.5,
                 "Curve steep — markets pricing better growth / term premium",
                 bucket="financial",
+                observed_date=treasury_yields.get("record_date"),
             )
 
     spy = _market_row(markets, "SPY")
     if spy.get("pct_change") is not None:
         pc = float(spy["pct_change"])
         if pc > 0.25:
-            add_component("Risk assets (SPY)", 4.0, "S&P 500 ETF up vs prior session", bucket="financial")
+            add_component(
+                "Risk assets (SPY)",
+                4.0,
+                "S&P 500 ETF up vs prior session",
+                bucket="financial",
+                observed_date=spy.get("latest_date"),
+            )
         elif pc < -0.35:
-            add_component("Risk assets (SPY)", -4.0, "S&P 500 ETF down vs prior session", bucket="financial")
+            add_component(
+                "Risk assets (SPY)",
+                -4.0,
+                "S&P 500 ETF down vs prior session",
+                bucket="financial",
+                observed_date=spy.get("latest_date"),
+            )
 
     vix = _market_row(markets, "^VIX")
     if vix.get("pct_change") is not None:
         pc = float(vix["pct_change"])
         if pc < -3:
-            add_component("Volatility (VIX)", 3.0, "VIX fell — calmer risk pricing", bucket="financial")
+            add_component(
+                "Volatility (VIX)",
+                3.0,
+                "VIX fell — calmer risk pricing",
+                bucket="financial",
+                observed_date=vix.get("latest_date"),
+            )
         elif pc > 5:
-            add_component("Volatility (VIX)", -4.0, "VIX jumped — risk-off tone", bucket="financial")
+            add_component(
+                "Volatility (VIX)",
+                -4.0,
+                "VIX jumped — risk-off tone",
+                bucket="financial",
+                observed_date=vix.get("latest_date"),
+            )
 
     hsent = _headline_sentiment_pulse(headlines)
     if hsent is not None:
@@ -804,6 +1010,15 @@ def compute_us_economy_direction(
     _tax_fiscal_pulse(tax_metrics, add_component)
     _activity_pulse(activity_metrics, add_component)
 
+    raw_score = max(0.0, min(100.0, score))
+    avg_freshness = (
+        sum(float(c.get("freshness", 1.0)) for c in components) / len(components) if components else 1.0
+    )
+    active_bucket_count = sum(1 for v in bucket_totals.values() if abs(v) > 1e-9)
+    bucket_coverage = active_bucket_count / max(1, len(bucket_caps))
+    signal_density = min(1.0, len(components) / 10.0)
+    reliability = max(0.45, min(1.0, 0.55 * avg_freshness + 0.35 * bucket_coverage + 0.10 * signal_density))
+    score = 50.0 + (raw_score - 50.0) * reliability
     score = max(0.0, min(100.0, score))
     if score >= 62:
         verdict = "Expansion bias"
@@ -817,12 +1032,16 @@ def compute_us_economy_direction(
 
     return {
         "score": round(score, 1),
+        "raw_score": round(raw_score, 1),
+        "reliability": round(reliability, 2),
         "verdict": verdict,
         "band": band,
         "components": components,
+        "bucket_subtotals": {k: round(v, 1) for k, v in bucket_totals.items()},
         "method": (
-            "Bucketed heuristic: growth/labor, inflation, financial conditions, news sentiment, "
-            "consumer rates, fiscal stance, and activity/housing; each bucket is capped to reduce over-dominance."
+            "Bucketed heuristic with caps, freshness decay, and reliability shrink toward neutral when data is stale "
+            "or narrow: growth/labor, inflation, financial conditions, news sentiment, consumer rates, fiscal stance, "
+            "and activity/housing."
         ),
     }
 
