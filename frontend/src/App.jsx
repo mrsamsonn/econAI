@@ -123,6 +123,129 @@ function Card({ title, children, className = "" }) {
   );
 }
 
+/** Lightweight placeholder layout (CSS opacity pulse only — no charts or timers). */
+function DashboardSkeleton() {
+  return (
+    <div
+      className="dashboard-skeleton"
+      role="status"
+      aria-live="polite"
+      aria-busy="true"
+      aria-label="Loading dashboard"
+    >
+      <section className="skeleton-pulse-card" aria-hidden>
+        <div className="skeleton-pulse-row">
+          <div className="sk sk-pulse-score" />
+          <div className="skeleton-pulse-text">
+            <div className="sk sk-line sk-line-wide" />
+            <div className="sk sk-line sk-line-narrow" />
+          </div>
+        </div>
+        <div className="skeleton-bar-outer" aria-hidden>
+          <div className="sk sk-pulse-barfill" />
+        </div>
+      </section>
+
+      <section className="layout-columns">
+        <div className="layout-col layout-left">
+          <section className="card card-timeline">
+            <div className="sk sk-card-title" />
+            <div className="skeleton-pills">
+              {[1, 2, 3, 4, 5, 6].map((i) => (
+                <div key={i} className="sk sk-pill" />
+              ))}
+            </div>
+            <div className="sk sk-line sk-line-sub" />
+          </section>
+
+          <section className="card card-yield">
+            <div className="sk sk-card-title sk-w-medium" />
+            <div className="skeleton-yield-grid">
+              {[1, 2, 3, 4, 5, 6, 7, 8].map((i) => (
+                <div key={i} className="sk sk-yield-cell" />
+              ))}
+            </div>
+            <div className="sk sk-chart-block" />
+          </section>
+
+          <section className="card card-span-2 card-global">
+            <div className="sk sk-card-title sk-w-short" />
+            <div className="skeleton-compare">
+              <div className="sk sk-chart-block sk-chart-short" />
+              <div className="sk sk-chart-block sk-chart-short" />
+            </div>
+          </section>
+        </div>
+
+        <div className="layout-col layout-main">
+          <section className="card card-span-2 card-macro">
+            <div className="sk sk-card-title" />
+            <div className="skeleton-rows">
+              {[1, 2, 3, 4, 5].map((i) => (
+                <div key={i} className="skeleton-feed-row">
+                  <div className="skeleton-feed-left">
+                    <div className="sk sk-line sk-line-feed-title" />
+                    <div className="sk sk-line sk-line-feed-meta" />
+                  </div>
+                  <div className="sk sk-line sk-line-feed-value" />
+                </div>
+              ))}
+            </div>
+            <div className="chart-grid-full skeleton-chart-grid">
+              {[1, 2, 3, 4].map((i) => (
+                <div key={i} className="sk sk-chart-tile" />
+              ))}
+            </div>
+          </section>
+        </div>
+
+        <div className="layout-col layout-right">
+          <section className="card card-span-2 card-markets">
+            <div className="sk sk-card-title sk-w-medium" />
+            <div className="skeleton-rows">
+              {[1, 2, 3, 4, 5].map((i) => (
+                <div key={i} className="skeleton-feed-row">
+                  <div className="skeleton-feed-left">
+                    <div className="sk sk-line sk-line-feed-title" />
+                    <div className="sk sk-line sk-line-feed-meta" />
+                  </div>
+                  <div className="sk sk-line sk-line-feed-value" />
+                </div>
+              ))}
+            </div>
+            <div className="chart-grid-full skeleton-chart-grid">
+              {[1, 2, 3, 4].map((i) => (
+                <div key={i} className="sk sk-chart-tile" />
+              ))}
+            </div>
+          </section>
+        </div>
+      </section>
+
+      <section className="below-section">
+        <section className="card card-headlines">
+          <div className="sk sk-card-title sk-w-long" />
+          <div className="sk sk-line sk-line-sub" />
+          <div className="skeleton-headlines">
+            {[1, 2, 3, 4, 5, 6].map((i) => (
+              <div key={i} className="skeleton-headline-row">
+                <div className="skeleton-headline-main">
+                  <div className="sk sk-line sk-line-headline-a" />
+                  <div className="sk sk-line sk-line-headline-b" />
+                </div>
+                <div className="skeleton-headline-tags">
+                  <div className="sk sk-tag" />
+                  <div className="sk sk-tag sk-tag-wide" />
+                </div>
+              </div>
+            ))}
+          </div>
+        </section>
+      </section>
+    </div>
+  );
+}
+
 function getMetricPreference(key) {
   return METRIC_PREFERENCE[key] || "Context dependent";
 }
@@ -409,88 +532,91 @@ export default function App() {
         </div>
       </header>
 
-      {loading && <p className="state">Loading dashboard...</p>}
       {error && <p className="state error">{error}</p>}
 
-      {data?.us_economy_direction && (
-        <section className={`economy-pulse pulse-${data.us_economy_direction.band || "neutral"}`}>
-          <div className="pulse-main">
-            <div className="pulse-score-wrap">
-              <span className="pulse-score">{formatNumber(data.us_economy_direction.score, 0)}</span>
-              <span className="pulse-out-of">/ 100</span>
-            </div>
-            <div>
-              <div className="pulse-verdict">{data.us_economy_direction.verdict}</div>
-              <div className="sub">{data.us_economy_direction.method}</div>
-            </div>
-          </div>
-          <div className="pulse-bar-outer" aria-hidden>
-            <div
-              className="pulse-bar-inner"
-              style={{ width: `${Math.min(100, Math.max(0, Number(data.us_economy_direction.score)))}%` }}
-            />
-          </div>
-          <div className="pulse-legend" role="group" aria-label="Economy pulse score bands">
-            <div className="pulse-legend-title">Verdict bands (heuristic score)</div>
-            <ul className="pulse-legend-list">
-              <li>
-                <span className="pulse-legend-swatch swatch-positive" aria-hidden />
-                <span>
-                  <strong>62–100</strong> — Expansion bias
-                </span>
-              </li>
-              <li>
-                <span className="pulse-legend-swatch swatch-neutral" aria-hidden />
-                <span>
-                  <strong>39–61</strong> — Mixed / transitioning
-                </span>
-              </li>
-              <li>
-                <span className="pulse-legend-swatch swatch-negative" aria-hidden />
-                <span>
-                  <strong>0–38</strong> — Slowdown / risk bias
-                </span>
-              </li>
-            </ul>
-          </div>
-          {(data.us_economy_direction.components || []).length > 0 && (
-            <div className="pulse-drivers">
-              <button
-                type="button"
-                className="pulse-drivers-toggle"
-                onClick={() => setPulseDriversOpen((open) => !open)}
-                aria-expanded={pulseDriversOpen}
-                aria-controls="pulse-drivers-list"
-                id="pulse-drivers-toggle"
-              >
-                {pulseDriversOpen
-                  ? "Hide score drivers"
-                  : `Show score drivers (${data.us_economy_direction.components.length})`}
-              </button>
-              {pulseDriversOpen && (
-                <ul className="pulse-components" id="pulse-drivers-list" aria-labelledby="pulse-drivers-toggle">
-                  {data.us_economy_direction.components.map((c) => (
-                    <li
-                      key={c.name}
-                      className={tipForPulseDriverLine(c.name) ? "metric-tip" : undefined}
-                      title={tipForPulseDriverLine(c.name)}
-                    >
-                      <strong>{c.name}</strong>{" "}
-                      <span className={c.delta >= 0 ? "delta-pos" : "delta-neg"}>
-                        ({c.delta >= 0 ? "+" : ""}
-                        {c.delta})
-                      </span>
-                      : {c.detail}
-                    </li>
-                  ))}
+      {loading && !data ? (
+        <DashboardSkeleton />
+      ) : (
+        <>
+          {data?.us_economy_direction && (
+            <section className={`economy-pulse pulse-${data.us_economy_direction.band || "neutral"}`}>
+              <div className="pulse-main">
+                <div className="pulse-score-wrap">
+                  <span className="pulse-score">{formatNumber(data.us_economy_direction.score, 0)}</span>
+                  <span className="pulse-out-of">/ 100</span>
+                </div>
+                <div>
+                  <div className="pulse-verdict">{data.us_economy_direction.verdict}</div>
+                  <div className="sub">{data.us_economy_direction.method}</div>
+                </div>
+              </div>
+              <div className="pulse-bar-outer" aria-hidden>
+                <div
+                  className="pulse-bar-inner"
+                  style={{ width: `${Math.min(100, Math.max(0, Number(data.us_economy_direction.score)))}%` }}
+                />
+              </div>
+              <div className="pulse-legend" role="group" aria-label="Economy pulse score bands">
+                <div className="pulse-legend-title">Verdict bands (heuristic score)</div>
+                <ul className="pulse-legend-list">
+                  <li>
+                    <span className="pulse-legend-swatch swatch-positive" aria-hidden />
+                    <span>
+                      <strong>62–100</strong> — Expansion bias
+                    </span>
+                  </li>
+                  <li>
+                    <span className="pulse-legend-swatch swatch-neutral" aria-hidden />
+                    <span>
+                      <strong>39–61</strong> — Mixed / transitioning
+                    </span>
+                  </li>
+                  <li>
+                    <span className="pulse-legend-swatch swatch-negative" aria-hidden />
+                    <span>
+                      <strong>0–38</strong> — Slowdown / risk bias
+                    </span>
+                  </li>
                 </ul>
+              </div>
+              {(data.us_economy_direction.components || []).length > 0 && (
+                <div className="pulse-drivers">
+                  <button
+                    type="button"
+                    className="pulse-drivers-toggle"
+                    onClick={() => setPulseDriversOpen((open) => !open)}
+                    aria-expanded={pulseDriversOpen}
+                    aria-controls="pulse-drivers-list"
+                    id="pulse-drivers-toggle"
+                  >
+                    {pulseDriversOpen
+                      ? "Hide score drivers"
+                      : `Show score drivers (${data.us_economy_direction.components.length})`}
+                  </button>
+                  {pulseDriversOpen && (
+                    <ul className="pulse-components" id="pulse-drivers-list" aria-labelledby="pulse-drivers-toggle">
+                      {data.us_economy_direction.components.map((c) => (
+                        <li
+                          key={c.name}
+                          className={tipForPulseDriverLine(c.name) ? "metric-tip" : undefined}
+                          title={tipForPulseDriverLine(c.name)}
+                        >
+                          <strong>{c.name}</strong>{" "}
+                          <span className={c.delta >= 0 ? "delta-pos" : "delta-neg"}>
+                            ({c.delta >= 0 ? "+" : ""}
+                            {c.delta})
+                          </span>
+                          : {c.detail}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
               )}
-            </div>
+            </section>
           )}
-        </section>
-      )}
 
-      <section className="layout-columns">
+          <section className="layout-columns">
         <div className="layout-col layout-left">
           <Card title="Timeline" className="card-timeline">
             <div className="timeline-controls">
@@ -696,6 +822,8 @@ export default function App() {
           </div>
         </Card>
       </section>
+        </>
+      )}
 
       {expandedChartData && (
         <div className="modal-backdrop" onClick={() => setExpandedChart(null)} role="presentation">
