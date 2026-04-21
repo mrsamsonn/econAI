@@ -34,6 +34,29 @@ const DATA_REFRESH_MS =
     : MIN_DATA_REFRESH_MS;
 const EMPTY_HEADLINES = [];
 const TIMELINE_OPTIONS = ["1M", "3M", "YTD", "1Y", "5Y", "ALL"];
+
+/** Recharts defaults use a white tooltip — unreadable on our dark UI. */
+const CHART_TOOLTIP_PROPS = {
+  contentStyle: {
+    backgroundColor: "#141c2b",
+    border: "1px solid #2f4058",
+    borderRadius: 8,
+    boxShadow: "0 4px 18px rgba(0, 0, 0, 0.45)",
+  },
+  labelStyle: {
+    color: "#eef4ff",
+    fontWeight: 600,
+    fontSize: 12,
+    marginBottom: 4,
+  },
+  itemStyle: {
+    color: "#c5d4ea",
+    fontSize: 12,
+  },
+};
+
+const CHART_LINE_TOOLTIP_CURSOR = { stroke: "#5a7ab0", strokeWidth: 1, strokeDasharray: "4 4" };
+const CHART_BAR_TOOLTIP_CURSOR = { fill: "rgba(107, 168, 255, 0.14)" };
 const METRIC_PREFERENCE = {
   CPIAUCSL: "Lower is generally better",
   UNRATE: "Lower is generally better",
@@ -350,7 +373,12 @@ function TrendChart({ title, data, yLabel, onExpand, preference, glossaryKey }) 
               width={70}
               tickFormatter={formatCompact}
             />
-            <Tooltip formatter={(value) => formatNumber(value)} labelFormatter={formatDateFromTs} />
+            <Tooltip
+              {...CHART_TOOLTIP_PROPS}
+              cursor={CHART_LINE_TOOLTIP_CURSOR}
+              formatter={(value) => formatNumber(value)}
+              labelFormatter={formatDateFromTs}
+            />
             <Line type="monotone" dataKey="value" stroke="#6ba8ff" strokeWidth={2} dot={false} />
           </LineChart>
         </ResponsiveContainer>
@@ -756,7 +784,11 @@ export default function App() {
                   <CartesianGrid strokeDasharray="3 3" stroke="#223046" />
                   <XAxis dataKey="tenor" stroke="#9cb0cb" />
                   <YAxis domain={yieldDomain} stroke="#9cb0cb" unit="%" tickFormatter={formatNumber} />
-                  <Tooltip formatter={(v) => `${formatNumber(v)}%`} />
+                  <Tooltip
+                    {...CHART_TOOLTIP_PROPS}
+                    cursor={CHART_LINE_TOOLTIP_CURSOR}
+                    formatter={(v) => `${formatNumber(v)}%`}
+                  />
                   <Line type="monotone" dataKey="value" stroke="#7ce3b1" strokeWidth={2} />
                 </LineChart>
               </ResponsiveContainer>
@@ -788,7 +820,11 @@ export default function App() {
                       tickFormatter={(v) => `${(v / 1e12).toFixed(1)}T`}
                       width={64}
                     />
-                    <Tooltip formatter={(v) => formatNumber(v, 0)} />
+                    <Tooltip
+                      {...CHART_TOOLTIP_PROPS}
+                      cursor={CHART_BAR_TOOLTIP_CURSOR}
+                      formatter={(v) => formatNumber(v, 0)}
+                    />
                     <Bar dataKey="value" fill="#6ba8ff" />
                   </BarChart>
                 </ResponsiveContainer>
@@ -811,7 +847,11 @@ export default function App() {
                       height={52}
                     />
                     <YAxis domain={inflationDomain} stroke="#9cb0cb" unit="%" width={50} tickFormatter={formatNumber} />
-                    <Tooltip formatter={(v) => `${formatNumber(v)}%`} />
+                    <Tooltip
+                      {...CHART_TOOLTIP_PROPS}
+                      cursor={{ fill: "rgba(240, 168, 75, 0.16)" }}
+                      formatter={(v) => `${formatNumber(v)}%`}
+                    />
                     <Bar dataKey="value" fill="#f0a84b" />
                   </BarChart>
                 </ResponsiveContainer>
@@ -944,7 +984,12 @@ export default function App() {
                     tickFormatter={formatCompact}
                     width={80}
                   />
-                  <Tooltip formatter={(v) => formatNumber(v)} labelFormatter={formatDateFromTs} />
+                  <Tooltip
+                    {...CHART_TOOLTIP_PROPS}
+                    cursor={CHART_LINE_TOOLTIP_CURSOR}
+                    formatter={(v) => formatNumber(v)}
+                    labelFormatter={formatDateFromTs}
+                  />
                   <Line type="monotone" dataKey="value" stroke="#6ba8ff" strokeWidth={2} dot={false} />
                 </LineChart>
               </ResponsiveContainer>

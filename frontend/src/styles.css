@@ -5,6 +5,21 @@
   color: #f0f5ff;
 }
 
+/* Recharts fallback if a chart omits Tooltip contentStyle (defaults are light-on-light). */
+.recharts-default-tooltip {
+  background-color: #141c2b !important;
+  border: 1px solid #2f4058 !important;
+  border-radius: 8px !important;
+}
+
+.recharts-tooltip-label {
+  color: #eef4ff !important;
+}
+
+.recharts-tooltip-item {
+  color: #c5d4ea !important;
+}
+
 * {
   box-sizing: border-box;
 }
