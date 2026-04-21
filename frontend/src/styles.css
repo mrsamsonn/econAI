@@ -165,6 +165,44 @@ body {
   margin-top: 12px;
 }
 
+.extra-metrics-row {
+  margin-top: 12px;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  align-items: stretch;
+}
+
+.extra-metrics-hint {
+  margin-top: 0;
+  margin-bottom: 8px;
+  line-height: 1.35;
+}
+
+.card-extra h3 {
+  font-size: 14px;
+  line-height: 1.25;
+}
+
+.mini-trend-wrap {
+  margin-top: 8px;
+  border: 1px solid #243349;
+  border-radius: 8px;
+  padding: 6px 8px 4px;
+  background: #0f1724;
+}
+
+.mini-trend-note {
+  margin-top: 6px;
+  font-size: 11px;
+  line-height: 1.35;
+  color: #90a0ba;
+}
+
+.extra-metrics-row--skeleton .card-extra {
+  min-height: 180px;
+}
+
 .economy-pulse {
   margin-top: 12px;
   border: 1px solid #2f4058;
@@ -759,6 +797,10 @@ body {
   }
 
   .headlines-by-impact {
+    grid-template-columns: 1fr;
+  }
+
+  .extra-metrics-row {
     grid-template-columns: 1fr;
   }
 }

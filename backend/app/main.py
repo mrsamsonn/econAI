@@ -1,3 +1,4 @@
+import asyncio
 import re
 from datetime import datetime, timezone
 from html import unescape
@@ -29,6 +30,26 @@ FRED_SERIES: Dict[str, Dict[str, str]] = {
     "real_gdp": {"series_id": "GDPC1", "label": "Real GDP"},
     "fed_funds_rate": {"series_id": "FEDFUNDS", "label": "Fed Funds Rate"},
     "initial_claims": {"series_id": "ICSA", "label": "Initial Jobless Claims"},
+}
+
+# Extra FRED blocks (same CSV shape as core `economy` rows) for dashboard columns + pulse heuristics.
+INTEREST_RATE_SERIES: Dict[str, str] = {
+    "MORTGAGE30US": "30-year fixed mortgage rate",
+    "TERMCBAUTO48NS": "48-mo new auto loan rate (finance cos.)",
+    "MPRIME": "Bank prime loan rate",
+    "TB3MS": "3-month Treasury bill (secondary market)",
+}
+
+TAX_FRED_SERIES: Dict[str, str] = {
+    "FYFSGDA188S": "Federal surplus or deficit (% of GDP)",
+    "GFDEGDQ188S": "Federal public debt (% of GDP)",
+    "FYFRGDA188S": "Federal current receipts (% of GDP)",
+}
+
+ACTIVITY_FRED_SERIES: Dict[str, str] = {
+    "UMCSENT": "U. of Michigan consumer sentiment",
+    "RSXFS": "Retail sales ex food services & motor vehicles",
+    "HOUST": "Housing starts, U.S. total (SAAR)",
 }
 
 YF_TICKERS: Dict[str, Dict[str, str]] = {
@@ -182,7 +203,7 @@ _NEGATIVE_LEXICON: List[Tuple[str, float]] = [
 
 
 async def fetch_fred_series(
-    client: httpx.AsyncClient, series_id: str, label: str
+    client: httpx.AsyncClient, series_id: str, label: str, history_limit: Optional[int] = 240
 ) -> Dict[str, Any]:
     url = f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={series_id}"
     try:
@@ -206,6 +227,8 @@ async def fetch_fred_series(
             else None
         )
 
+        history_df = df if history_limit is None else df.tail(history_limit)
+
         return {
             "series_id": series_id,
             "label": label,
@@ -213,7 +236,7 @@ async def fetch_fred_series(
             "latest_value": float(latest["value"]),
             "change": change,
             "pct_change": pct_change,
-            "history": df.tail(240).to_dict(orient="records"),
+            "history": history_df.to_dict(orient="records"),
         }
     except Exception as exc:
         return {"series_id": series_id, "label": label, "error": str(exc)}
@@ -548,14 +571,109 @@ def _market_row(markets: List[Dict[str, Any]], symbol: str) -> Dict[str, Any]:
     return {}
 
 
+def _headline_sentiment_pulse(headlines: List[Dict[str, Any]]) -> Optional[Tuple[float, str]]:
+    """Aggregate VADER `sentiment_compound` from classified RSS headlines into a score nudge."""
+    comps: List[float] = []
+    for h in headlines:
+        v = h.get("sentiment_compound")
+        if isinstance(v, bool) or v is None:
+            continue
+        try:
+            comps.append(float(v))
+        except (TypeError, ValueError):
+            continue
+    if not comps:
+        return None
+    avg = sum(comps) / len(comps)
+    delta = max(-12.0, min(12.0, avg * 28.0))
+    detail = f"Mean VADER compound {avg:.3f} across {len(comps)} RSS headlines (title + body text)"
+    return delta, detail
+
+
+def _interest_rate_pulse(rows: List[Dict[str, Any]], add_component) -> None:
+    """Lower quoted consumer / benchmark rates vs prior print → modest easing read for the pulse."""
+    specs = [
+        ("MORTGAGE30US", "Mortgage (30Y)", 0.02),
+        ("TERMCBAUTO48NS", "Auto loan (48M)", 0.04),
+        ("MPRIME", "Bank prime", 0.03),
+        ("TB3MS", "T-bill 3M", 0.02),
+    ]
+    for sid, label, thr in specs:
+        row = _fred_row(rows, sid)
+        if row.get("error") or row.get("change") is None:
+            continue
+        ch = float(row["change"])
+        if ch < -thr:
+            add_component(f"Rates — {label}", 1.6, f"{label} fell {abs(ch):.2f} pts vs prior observation")
+        elif ch > thr:
+            add_component(f"Rates — {label}", -1.6, f"{label} rose {ch:.2f} pts vs prior observation")
+
+
+def _tax_fiscal_pulse(rows: List[Dict[str, Any]], add_component) -> None:
+    """High-level fiscal stance deltas (% of GDP series, mostly quarterly / annual)."""
+    bal = _fred_row(rows, "FYFSGDA188S")
+    if bal.get("change") is not None:
+        ch = float(bal["change"])
+        if ch > 0.08:
+            add_component("Fiscal balance (% GDP)", 3.2, "Surplus improved / deficit narrowed vs prior print")
+        elif ch < -0.08:
+            add_component("Fiscal balance (% GDP)", -3.2, "Deficit widened vs prior print")
+
+    debt = _fred_row(rows, "GFDEGDQ188S")
+    if debt.get("change") is not None:
+        ch = float(debt["change"])
+        if ch > 0.15:
+            add_component("Public debt (% GDP)", -2.4, "Debt-to-GDP moved up vs prior observation")
+        elif ch < -0.12:
+            add_component("Public debt (% GDP)", 2.0, "Debt-to-GDP improved vs prior observation")
+
+    rec = _fred_row(rows, "FYFRGDA188S")
+    if rec.get("change") is not None:
+        ch = float(rec["change"])
+        if ch > 0.12:
+            add_component("Federal receipts (% GDP)", 1.8, "Receipts share of GDP rose vs prior print")
+        elif ch < -0.12:
+            add_component("Federal receipts (% GDP)", -1.8, "Receipts share of GDP fell vs prior print")
+
+
+def _activity_pulse(rows: List[Dict[str, Any]], add_component) -> None:
+    sent = _fred_row(rows, "UMCSENT")
+    if sent.get("change") is not None:
+        ch = float(sent["change"])
+        if ch > 1.0:
+            add_component("Consumer sentiment", 4.5, "UMich sentiment improved vs prior month")
+        elif ch < -1.0:
+            add_component("Consumer sentiment", -4.5, "UMich sentiment softened vs prior month")
+
+    retail = _fred_row(rows, "RSXFS")
+    if retail.get("pct_change") is not None:
+        pc = float(retail["pct_change"])
+        if pc > 0.35:
+            add_component("Retail sales (ex-auto)", 3.5, "Retail sales rose vs prior month")
+        elif pc < -0.35:
+            add_component("Retail sales (ex-auto)", -3.5, "Retail sales fell vs prior month")
+
+    starts = _fred_row(rows, "HOUST")
+    if starts.get("change") is not None:
+        ch = float(starts["change"])
+        if ch > 2.5:
+            add_component("Housing starts", 3.8, "Starts picked up vs prior month (SAAR units)")
+        elif ch < -2.5:
+            add_component("Housing starts", -3.8, "Starts cooled vs prior month (SAAR units)")
+
+
 def compute_us_economy_direction(
     economy: List[Dict[str, Any]],
     treasury_yields: Dict[str, Any],
     markets: List[Dict[str, Any]],
+    interest_rates: List[Dict[str, Any]],
+    tax_metrics: List[Dict[str, Any]],
+    activity_metrics: List[Dict[str, Any]],
+    headlines: List[Dict[str, Any]],
 ) -> Dict[str, Any]:
     """
-    Heuristic 0–100 pulse from public series already on the dashboard.
-    Not a forecast — a compact read of recent momentum + yield curve shape.
+    Heuristic 0–100 pulse from FRED + market data + RSS headline sentiment.
+    Not a forecast — a compact read of momentum, curve shape, and news tone.
     """
     components: List[Dict[str, Any]] = []
     score = 50.0
@@ -634,6 +752,15 @@ def compute_us_economy_direction(
         elif pc > 5:
             add_component("Volatility (VIX)", -5, "VIX jumped — risk-off tone")
 
+    hsent = _headline_sentiment_pulse(headlines)
+    if hsent is not None:
+        delta, detail = hsent
+        add_component("News flow (RSS headline sentiment)", round(delta, 1), detail)
+
+    _interest_rate_pulse(interest_rates, add_component)
+    _tax_fiscal_pulse(tax_metrics, add_component)
+    _activity_pulse(activity_metrics, add_component)
+
     score = max(0.0, min(100.0, score))
     if score >= 62:
         verdict = "Expansion bias"
@@ -650,7 +777,10 @@ def compute_us_economy_direction(
         "verdict": verdict,
         "band": band,
         "components": components,
-        "method": "Heuristic blend of latest FRED deltas, 10Y−2Y spread, and SPY/VIX session moves.",
+        "method": (
+            "Heuristic blend of FRED deltas, Treasury 10Y−2Y spread, SPY/VIX, RSS headline VADER sentiment, "
+            "consumer rates, fiscal %‑of‑GDP series, and retail/sentiment/housing starts."
+        ),
     }
 
 
@@ -679,6 +809,13 @@ async def health() -> Dict[str, str]:
     return {"status": "ok"}
 
 
+async def _fetch_fred_group(
+    client: httpx.AsyncClient, spec: Dict[str, str], history_limit: Optional[int] = 240
+) -> List[Dict[str, Any]]:
+    tasks = [fetch_fred_series(client, series_id=sid, label=lab, history_limit=history_limit) for sid, lab in spec.items()]
+    return list(await asyncio.gather(*tasks))
+
+
 @app.get("/api/dashboard")
 async def dashboard(response: Response) -> Dict[str, Any]:
     response.headers["Cache-Control"] = "no-store, max-age=0"
@@ -693,6 +830,13 @@ async def dashboard(response: Response) -> Dict[str, Any]:
                 )
             )
 
+        interest_rates, tax_metrics, activity_metrics, headlines = await asyncio.gather(
+            _fetch_fred_group(client, INTEREST_RATE_SERIES, history_limit=None),
+            _fetch_fred_group(client, TAX_FRED_SERIES, history_limit=None),
+            _fetch_fred_group(client, ACTIVITY_FRED_SERIES, history_limit=None),
+            fetch_headlines(client),
+        )
+
         markets: List[Dict[str, Any]] = []
         for _, metadata in YF_TICKERS.items():
             markets.append(
@@ -706,12 +850,15 @@ async def dashboard(response: Response) -> Dict[str, Any]:
         debt_interest_meta = await fetch_avg_interest_rates(client)
         gdp_compare = await fetch_country_series(client, COUNTRY_GDP_SERIES)
         inflation_compare = await fetch_country_series(client, COUNTRY_CPI_SERIES)
-        headlines = await fetch_headlines(client)
 
     economy_direction = compute_us_economy_direction(
         economy=fred_data,
         treasury_yields=treasury_yields if isinstance(treasury_yields, dict) else {},
         markets=markets,
+        interest_rates=interest_rates,
+        tax_metrics=tax_metrics,
+        activity_metrics=activity_metrics,
+        headlines=headlines,
     )
 
     return {
@@ -719,6 +866,9 @@ async def dashboard(response: Response) -> Dict[str, Any]:
         "economy": fred_data,
         "markets": markets,
         "us_economy_direction": economy_direction,
+        "interest_rates": interest_rates,
+        "tax_metrics": tax_metrics,
+        "activity_metrics": activity_metrics,
         "treasury_yields": treasury_yields,
         "fiscal_meta": debt_interest_meta,
         "global_compare": {
@@ -727,9 +877,9 @@ async def dashboard(response: Response) -> Dict[str, Any]:
         },
         "headlines": headlines,
         "sources": [
-            "FRED public CSV endpoints",
+            "FRED public CSV endpoints (core macro + rates + fiscal + activity)",
             "US Treasury Fiscal Data API",
             "Yahoo Finance public market data",
-            "Reuters/AP public RSS feeds",
+            "Public RSS headlines (Yahoo / CNBC / Fed)",
         ],
     }

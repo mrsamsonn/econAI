@@ -73,6 +73,16 @@ const METRIC_PREFERENCE = {
   YIELD_CURVE: "Context dependent",
   GDP_COMPARE: "Higher is generally better",
   INFLATION_COMPARE: "Lower is generally better",
+  MORTGAGE30US: "Lower is often better for housing affordability (context: growth vs inflation)",
+  TERMCBAUTO48NS: "Lower is often better for auto affordability",
+  MPRIME: "Context dependent (policy vs credit conditions)",
+  TB3MS: "Context dependent (policy expectations vs growth fears)",
+  FYFSGDA188S: "Higher surplus / smaller deficit as % of GDP is often viewed as tighter fiscal stance",
+  GFDEGDQ188S: "Lower debt-to-GDP is generally preferable long-run",
+  FYFRGDA188S: "Context dependent (revenue strength vs tax policy)",
+  UMCSENT: "Higher is generally better (consumer confidence)",
+  RSXFS: "Higher is generally better (nominal retail demand)",
+  HOUST: "Higher is generally better (residential construction)",
 };
 
 /** Short hover explanations (native `title` tooltips). */
@@ -109,6 +119,26 @@ const METRIC_GLOSSARY = {
   YIELD_5Y: "5-year Treasury yield — mid-curve; mixes growth, inflation, and rate expectations.",
   YIELD_10Y: "10-year Treasury yield — benchmark long rate for mortgages, credit spreads, and discounting cash flows.",
   YIELD_30Y: "30-year Treasury yield — long bond; term premium and long-horizon growth/inflation expectations.",
+  MORTGAGE30US:
+    "Freddie Mac Primary Mortgage Market Survey — average 30-year fixed mortgage rate. A key housing affordability and credit-conditions input.",
+  TERMCBAUTO48NS:
+    "Finance company new-car loan rate (48-month). A read on consumer credit pricing for autos.",
+  MPRIME:
+    "Bank prime loan rate — reference for many consumer and business floating-rate loans; moves with Fed policy and credit spreads.",
+  TB3MS:
+    "3-month Treasury bill secondary market rate — a pure short government borrowing rate; tracks near-term policy and cash yields.",
+  FYFSGDA188S:
+    "Federal surplus (+) or deficit (−) as a percent of GDP (annual NIPA). A high-level fiscal stance snapshot.",
+  GFDEGDQ188S:
+    "Federal debt held by the public as a percent of GDP — stock measure of leverage vs the size of the economy.",
+  FYFRGDA188S:
+    "Federal current receipts as a percent of GDP — how much of the economy the federal government collects in taxes/fees.",
+  UMCSENT:
+    "University of Michigan consumer sentiment index — survey-based read on household expectations for finances and the economy.",
+  RSXFS:
+    "Advance retail sales excluding motor vehicles & parts and food services — monthly nominal demand pulse.",
+  HOUST:
+    "New privately owned housing starts, seasonally adjusted annual rate — residential construction cycle indicator.",
 };
 
 const YIELD_TENOR_GLOSSARY_KEY = {
@@ -142,7 +172,6 @@ function formatSigned(value, digits = 2) {
 }
 
 function StatusPill({ change }) {
-  
   const isUp = change > 0;
   const isDown = change < 0;
   const cls = isUp ? "pill up" : isDown ? "pill down" : "pill flat";
@@ -271,6 +300,24 @@ function DashboardSkeleton() {
         </div>
       </section>
 
+      <section className="extra-metrics-row extra-metrics-row--skeleton" aria-hidden>
+        {[1, 2, 3].map((col) => (
+          <div key={col} className="card card-extra">
+            <div className="sk sk-card-title sk-w-medium" />
+            <div className="sk sk-line sk-line-sub" />
+            {[1, 2, 3, 4].map((row) => (
+              <div key={row} className="skeleton-feed-row">
+                <div className="skeleton-feed-left">
+                  <div className="sk sk-line sk-line-feed-title" />
+                  <div className="sk sk-line sk-line-feed-meta" />
+                </div>
+                <div className="sk sk-line sk-line-feed-value" />
+              </div>
+            ))}
+          </div>
+        ))}
+      </section>
+
       <section className="below-section">
         <section className="card card-headlines">
           <div className="sk sk-card-title sk-w-long" />
@@ -319,6 +366,51 @@ function formatDateLabel(value) {
 function formatDateFromTs(ts) {
   if (typeof ts !== "number" || Number.isNaN(ts)) return "";
   return new Date(ts).toLocaleDateString(undefined, { month: "short", year: "2-digit", timeZone: "UTC" });
+}
+
+function buildTimeTicksFromData(points, maxTicks = 5) {
+  const ts = points
+    .map((p) => Number(p.ts))
+    .filter((v) => Number.isFinite(v))
+    .sort((a, b) => a - b);
+  if (!ts.length) return [];
+  if (ts.length <= maxTicks) return ts;
+  const ticks = [];
+  const step = (ts.length - 1) / (maxTicks - 1);
+  for (let i = 0; i < maxTicks; i += 1) {
+    ticks.push(ts[Math.round(i * step)]);
+  }
+  return Array.from(new Set(ticks));
+}
+
+function pickMiniSeriesForTimeline(points, timeline) {
+  const sorted = [...points].sort((a, b) => String(a.date).localeCompare(String(b.date)));
+  if (!sorted.length) return [];
+  if (timeline === "ALL") return sorted;
+
+  const now = new Date();
+  const start = new Date(now);
+  if (timeline === "1M") start.setMonth(now.getMonth() - 1);
+  if (timeline === "3M") start.setMonth(now.getMonth() - 3);
+  if (timeline === "YTD") start.setMonth(0, 1);
+  if (timeline === "1Y") start.setFullYear(now.getFullYear() - 1);
+  if (timeline === "5Y") start.setFullYear(now.getFullYear() - 5);
+
+  const filtered = sorted.filter((p) => {
+    const date = new Date(p.date);
+    return !Number.isNaN(date.getTime()) && date >= start;
+  });
+  // Sparse annual/quarterly series can have 0-1 points in short windows.
+  if (filtered.length >= 2) return filtered;
+  const fallbackCountByTimeline = {
+    "1M": 2,
+    "3M": 2,
+    YTD: 2,
+    "1Y": 2,
+    "5Y": 6,
+  };
+  const n = fallbackCountByTimeline[timeline] ?? 2;
+  return sorted.slice(-Math.min(n, sorted.length));
 }
 
 function normalizeHistoryRows(history) {
@@ -385,6 +477,62 @@ function TrendChart({ title, data, yLabel, onExpand, preference, glossaryKey }) 
       </div>
       <div className="sub">{yLabel}</div>
       <div className="metric-hint">{preference}</div>
+    </div>
+  );
+}
+
+function MiniMetricTrend({
+  title,
+  data,
+  valueFormatter = formatNumber,
+  unit = "",
+  betterWhen = "Context dependent",
+  readingNote = "Trend line shows raw level over the selected timeline.",
+}) {
+  const domain = getDynamicDomain(data.map((d) => Number(d.value)));
+  const xTicks = useMemo(() => buildTimeTicksFromData(data, 5), [data]);
+  const isLongRange = useMemo(() => {
+    if (!data.length) return false;
+    const minTs = Math.min(...data.map((d) => Number(d.ts)).filter((v) => Number.isFinite(v)));
+    const maxTs = Math.max(...data.map((d) => Number(d.ts)).filter((v) => Number.isFinite(v)));
+    if (!Number.isFinite(minTs) || !Number.isFinite(maxTs)) return false;
+    const years = (maxTs - minTs) / (1000 * 60 * 60 * 24 * 365.25);
+    return years > 8;
+  }, [data]);
+  const xTickFormatter = (ts) => {
+    if (typeof ts !== "number" || Number.isNaN(ts)) return "";
+    if (isLongRange) return new Date(ts).toLocaleDateString(undefined, { year: "numeric", timeZone: "UTC" });
+    return formatDateFromTs(ts);
+  };
+  return (
+    <div className="mini-trend-wrap">
+      <div className="sub">{title}</div>
+      <ResponsiveContainer width="100%" height={140}>
+        <LineChart data={data}>
+          <CartesianGrid strokeDasharray="3 3" stroke="#223046" />
+          <XAxis
+            dataKey="ts"
+            type="number"
+            domain={["dataMin", "dataMax"]}
+            stroke="#9cb0cb"
+            ticks={xTicks}
+            tick={{ fontSize: 10 }}
+            tickFormatter={xTickFormatter}
+            minTickGap={20}
+          />
+          <YAxis domain={domain} stroke="#9cb0cb" tick={{ fontSize: 10 }} tickFormatter={valueFormatter} width={58} />
+          <Tooltip
+            {...CHART_TOOLTIP_PROPS}
+            cursor={CHART_LINE_TOOLTIP_CURSOR}
+            formatter={(v) => `${valueFormatter(v)}${unit}`}
+            labelFormatter={formatDateFromTs}
+          />
+          <Line type="monotone" dataKey="value" stroke="#6ba8ff" strokeWidth={2} dot={false} />
+        </LineChart>
+      </ResponsiveContainer>
+      <div className="mini-trend-note">
+        <strong>How to read:</strong> {readingNote} <strong>Rule of thumb:</strong> {betterWhen}.
+      </div>
     </div>
   );
 }
@@ -576,6 +724,9 @@ export default function App() {
 
   const economy = useMemo(() => data?.economy || [], [data]);
   const markets = useMemo(() => data?.markets || [], [data]);
+  const interestRates = useMemo(() => data?.interest_rates || [], [data]);
+  const taxMetrics = useMemo(() => data?.tax_metrics || [], [data]);
+  const activityMetrics = useMemo(() => data?.activity_metrics || [], [data]);
   const yields = data?.treasury_yields || {};
   const globalCompare = data?.global_compare || {};
   const headlines = data?.headlines ?? EMPTY_HEADLINES;
@@ -614,6 +765,22 @@ export default function App() {
     return { key: item.symbol, title: item.symbol, data: attachTimestamps(filtered) };
   });
 
+  const extraCharts = useMemo(() => {
+    const pick = (rows, seriesId, title) => {
+      const row = rows.find((r) => r.series_id === seriesId);
+      if (!row) return null;
+      const filtered = pickMiniSeriesForTimeline(normalizeHistoryRows(row.history), timeline);
+      const dataPts = attachTimestamps(filtered);
+      if (!dataPts.length) return null;
+      return { key: seriesId, title, data: dataPts };
+    };
+    return {
+      interest: pick(interestRates, "MORTGAGE30US", "30Y mortgage trend"),
+      tax: pick(taxMetrics, "FYFSGDA188S", "Federal balance (% GDP) trend"),
+      activity: pick(activityMetrics, "HOUST", "Housing starts trend"),
+    };
+  }, [interestRates, taxMetrics, activityMetrics, timeline]);
+
   const gdpBars = (globalCompare.gdp_usd_current || []).map((row) => ({
     country: row.country,
     value: Number(row.latest_value),
@@ -629,9 +796,9 @@ export default function App() {
 
   const expandedChartData = useMemo(() => {
     if (!expandedChart) return null;
-    const allCharts = [...macroCharts, ...marketCharts];
+    const allCharts = [...macroCharts, ...marketCharts, ...Object.values(extraCharts).filter(Boolean)];
     return allCharts.find((c) => c.key === expandedChart) || null;
-  }, [expandedChart, macroCharts, marketCharts]);
+  }, [expandedChart, macroCharts, marketCharts, extraCharts]);
 
   return (
     <main className="page">
@@ -937,6 +1104,119 @@ export default function App() {
             </div>
           </Card>
         </div>
+      </section>
+
+      <section className="extra-metrics-row" aria-label="Additional FRED indicators">
+        <Card title="Consumer & policy interest rates" className="card-extra">
+          <p className="sub extra-metrics-hint">
+            Mortgage, auto finance, bank prime, and 3M T-bill. Pulse treats modest rate drops as easing and hikes as
+            tightening (context dependent).
+          </p>
+          <div className="rows">
+            {interestRates.map((item) => (
+              <div key={item.series_id || item.label} className="row">
+                <div>
+                  <strong
+                    className={glossaryTip(item.series_id) ? "metric-tip" : undefined}
+                    title={glossaryTip(item.series_id)}
+                  >
+                    {item.label}
+                  </strong>
+                  <div className="sub">{item.latest_date || item.error}</div>
+                  <div className="metric-hint">{getMetricPreference(item.series_id)}</div>
+                </div>
+                <div className="right">
+                  <div>{formatNumber(item.latest_value)}</div>
+                  <StatusPill change={item.change} />
+                </div>
+              </div>
+            ))}
+          </div>
+          {extraCharts.interest && (
+            <MiniMetricTrend
+              title={extraCharts.interest.title}
+              data={extraCharts.interest.data}
+              unit="%"
+              betterWhen="Lower rates are usually better for borrower affordability."
+              readingNote="This is the level of average 30Y mortgage rates, not a growth rate."
+            />
+          )}
+        </Card>
+        <Card title="Fiscal stance (% of GDP)" className="card-extra">
+          <p className="sub extra-metrics-hint">
+            Surplus/deficit, debt, and receipts as shares of GDP. Updates are often quarterly or annual — read changes
+            cautiously.
+          </p>
+          <div className="rows">
+            {taxMetrics.map((item) => (
+              <div key={item.series_id || item.label} className="row">
+                <div>
+                  <strong
+                    className={glossaryTip(item.series_id) ? "metric-tip" : undefined}
+                    title={glossaryTip(item.series_id)}
+                  >
+                    {item.label}
+                  </strong>
+                  <div className="sub">{item.latest_date || item.error}</div>
+                  <div className="metric-hint">{getMetricPreference(item.series_id)}</div>
+                </div>
+                <div className="right">
+                  <div>{formatNumber(item.latest_value)}</div>
+                  <StatusPill change={item.change} />
+                </div>
+              </div>
+            ))}
+          </div>
+          {extraCharts.tax && (
+            <MiniMetricTrend
+              title={extraCharts.tax.title}
+              data={extraCharts.tax.data}
+              unit="%"
+              betterWhen="Higher (less negative) is generally better because deficits are smaller."
+              readingNote="This tracks federal balance as % of GDP; values below zero are deficits."
+            />
+          )}
+        </Card>
+        <Card title="Consumer demand & housing" className="card-extra">
+          <p className="sub extra-metrics-hint">
+            Michigan sentiment, retail sales ex-autos, and nationwide U.S. housing starts — demand-side momentum for
+            the pulse.
+          </p>
+          <div className="rows">
+            {activityMetrics.map((item) => (
+              <div key={item.series_id || item.label} className="row">
+                <div>
+                  <strong
+                    className={glossaryTip(item.series_id) ? "metric-tip" : undefined}
+                    title={glossaryTip(item.series_id)}
+                  >
+                    {item.label}
+                  </strong>
+                  <div className="sub">{item.latest_date || item.error}</div>
+                  <div className="metric-hint">{getMetricPreference(item.series_id)}</div>
+                </div>
+                <div className="right">
+                  <div>{formatNumber(item.latest_value)}</div>
+                  <StatusPill
+                    change={
+                      item.series_id === "RSXFS" && item.pct_change != null && item.pct_change !== undefined
+                        ? item.pct_change
+                        : item.change
+                    }
+                  />
+                </div>
+              </div>
+            ))}
+          </div>
+          {extraCharts.activity && (
+            <MiniMetricTrend
+              title={extraCharts.activity.title}
+              data={extraCharts.activity.data}
+              betterWhen="Higher is generally better for housing-cycle momentum."
+              readingNote="This is the level of housing starts (SAAR), so trend direction shows cycle strength/weakness."
+            />
+          )}
+        </Card>
       </section>
 
       <section className="below-section">
