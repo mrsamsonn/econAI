@@ -1,6 +1,6 @@
 import asyncio
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from html import unescape
 from io import StringIO
 from typing import Any, Dict, List, Optional, Tuple
@@ -30,6 +30,7 @@ FRED_SERIES: Dict[str, Dict[str, str]] = {
     "real_gdp": {"series_id": "GDPC1", "label": "Real GDP"},
     "fed_funds_rate": {"series_id": "FEDFUNDS", "label": "Fed Funds Rate"},
     "initial_claims": {"series_id": "ICSA", "label": "Initial Jobless Claims"},
+    "recession_indicator": {"series_id": "USREC", "label": "NBER recession indicator"},
 }
 
 # Extra FRED blocks (same CSV shape as core `economy` rows) for dashboard columns + pulse heuristics.
@@ -93,9 +94,15 @@ HEADLINE_SOURCES: List[Dict[str, str]] = [
     {"name": "Yahoo Finance", "url": "https://finance.yahoo.com/news/rssindex"},
     {"name": "CNBC", "url": "https://www.cnbc.com/id/100003114/device/rss/rss.html"},
     {"name": "Federal Reserve", "url": "https://www.federalreserve.gov/feeds/press_all.xml"},
+    {"name": "Reuters Business", "url": "https://feeds.reuters.com/reuters/businessNews"},
+    {"name": "Reuters World", "url": "https://feeds.reuters.com/Reuters/worldNews"},
+    {"name": "MarketWatch", "url": "http://feeds.marketwatch.com/marketwatch/topstories/"},
+    {"name": "NYTimes Business", "url": "https://rss.nytimes.com/services/xml/rss/nyt/Business.xml"},
+    {"name": "IMF News", "url": "https://www.imf.org/en/News/RSS"},
 ]
 
 _VADER = SentimentIntensityAnalyzer()
+_HISTORICAL_EVENTS_CACHE: Dict[str, Any] = {"expires_at": datetime.fromtimestamp(0, tz=timezone.utc), "data": []}
 
 # RSS `content:encoded` expanded tag (namespaces collapsed by ElementTree).
 _RSS_CONTENT_ENCODED = "{http://purl.org/rss/1.0/modules/content/}encoded"
@@ -407,6 +414,33 @@ def _rss_item_body_plain(item: ET.Element) -> str:
     return "\n\n".join(blobs).strip()
 
 
+def _parse_pub_datetime(raw: str) -> Tuple[str, Optional[int]]:
+    if not raw:
+        return "", None
+    dt = pd.to_datetime(raw, errors="coerce", utc=True)
+    if pd.isna(dt):
+        return raw.strip(), None
+    py = dt.to_pydatetime()
+    iso = py.isoformat()
+    ts = int(py.timestamp() * 1000)
+    return iso, ts
+
+
+def _dedupe_headline_items(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    seen = set()
+    out: List[Dict[str, Any]] = []
+    for it in items:
+        title = re.sub(r"\s+", " ", str(it.get("title") or "").lower()).strip()
+        src = str(it.get("source") or "").lower().strip()
+        day = str(it.get("published_at") or "")[:10]
+        key = f"{title}|{src}|{day}"
+        if not title or key in seen:
+            continue
+        seen.add(key)
+        out.append(it)
+    return out
+
+
 def _sentiment_corpus(title: str, body_plain: str, max_chars: int = 8000) -> str:
     """Title + article snippet for VADER (truncated to keep requests predictable)."""
     t = (title or "").strip()
@@ -545,8 +579,17 @@ def classify_headline(title: str, body_plain: str = "") -> Dict[str, Any]:
     }
 
 
-async def fetch_headlines(client: httpx.AsyncClient) -> List[Dict[str, Any]]:
+async def fetch_headlines(client: httpx.AsyncClient) -> Dict[str, List[Dict[str, Any]]]:
     results: List[Dict[str, Any]] = []
+    seen: set = set()
+
+    def _significance(item: Dict[str, Any]) -> float:
+        impact = abs(float(item.get("impact_score") or 0.0))
+        vader = abs(float(item.get("sentiment_compound") or 0.0))
+        area = str(item.get("impact_area") or "")
+        area_boost = 3.0 if area in {"Growth", "Inflation", "Labor Market", "Monetary Policy", "Energy/Supply"} else 0.0
+        return max(0.0, min(100.0, impact * 1.4 + vader * 22.0 + area_boost))
+
     for source in HEADLINE_SOURCES:
         try:
             response = await client.get(
@@ -556,27 +599,131 @@ async def fetch_headlines(client: httpx.AsyncClient) -> List[Dict[str, Any]]:
             )
             response.raise_for_status()
             root = ET.fromstring(response.text)
-            items = root.findall(".//item")[:5]
+            items = root.findall(".//item")[:80]
             for item in items:
                 title = (item.findtext("title") or "").strip()
                 link = (item.findtext("link") or "").strip()
                 pub_date = (item.findtext("pubDate") or "").strip()
                 if not title:
                     continue
+                title_key = re.sub(r"\s+", " ", title.lower()).strip()
+                dedupe_key = f"{title_key}|{link}".strip()
+                if dedupe_key in seen:
+                    continue
+                seen.add(dedupe_key)
                 body_plain = _rss_item_body_plain(item)
                 classification = classify_headline(title, body_plain)
+                pub_iso, pub_ts = _parse_pub_datetime(pub_date)
+                row = {
+                    "source": source["name"],
+                    "title": title,
+                    "url": link,
+                    "published_at": pub_iso or pub_date,
+                    "published_ts": pub_ts,
+                    **classification,
+                }
+                row["significance_score"] = round(_significance(row), 2)
+                sig = row["significance_score"]
+                row["significance_band"] = (
+                    "high" if sig >= 55 else "medium" if sig >= 35 else "low"
+                )
                 results.append(
-                    {
-                        "source": source["name"],
-                        "title": title,
-                        "url": link,
-                        "published_at": pub_date,
-                        **classification,
-                    }
+                    row
                 )
         except Exception:
             continue
-    return results[:12]
+    results.sort(
+        key=lambda h: (
+            -1 if h.get("published_ts") is None else 0,
+            h.get("published_ts") or 0,
+        ),
+        reverse=True,
+    )
+    # Keep headline cards concise while exposing deep historical/significant items for chart event overlays.
+    recent = results[:30]
+    significant = [h for h in results if float(h.get("significance_score") or 0.0) >= 30.0]
+    significant.sort(
+        key=lambda h: (
+            h.get("published_ts") or 0,
+            -float(h.get("significance_score") or 0.0),
+        )
+    )
+    if not significant:
+        significant = results[:80]
+    return {
+        "recent": recent,
+        "events": significant[:300],
+    }
+
+
+async def fetch_historical_news_events(client: httpx.AsyncClient) -> List[Dict[str, Any]]:
+    """
+    Pull older macro-significant events from GDELT article index.
+    Cached for 12h to avoid repeated heavy pulls on the 60s dashboard cycle.
+    """
+    now = datetime.now(timezone.utc)
+    if _HISTORICAL_EVENTS_CACHE["expires_at"] > now and _HISTORICAL_EVENTS_CACHE["data"]:
+        return _HISTORICAL_EVENTS_CACHE["data"]
+
+    windows = [
+        ("20000101000000", "20051231235959"),
+        ("20060101000000", "20101231235959"),
+        ("20110101000000", "20161231235959"),
+        ("20170101000000", "20201231235959"),
+        ("20210101000000", "20241231235959"),
+    ]
+    query = (
+        '(economy OR recession OR inflation OR "federal reserve" OR "rate hike" OR "banking crisis" '
+        'OR "war" OR "oil shock" OR "dot-com" OR "AI boom") sourcecountry:US'
+    )
+    out: List[Dict[str, Any]] = []
+    for start_dt, end_dt in windows:
+        try:
+            resp = await client.get(
+                "https://api.gdeltproject.org/api/v2/doc/doc",
+                params={
+                    "query": query,
+                    "mode": "ArtList",
+                    "maxrecords": 80,
+                    "format": "json",
+                    "startdatetime": start_dt,
+                    "enddatetime": end_dt,
+                },
+                timeout=25,
+                headers={"User-Agent": "econai-monitor/0.1"},
+            )
+            resp.raise_for_status()
+            payload = resp.json()
+            for art in payload.get("articles", []):
+                title = str(art.get("title") or "").strip()
+                if not title:
+                    continue
+                body_plain = str(art.get("seendate") or "")
+                classification = classify_headline(title, body_plain)
+                pub_iso, pub_ts = _parse_pub_datetime(str(art.get("seendate") or ""))
+                row = {
+                    "source": str(art.get("domain") or "GDELT"),
+                    "title": title,
+                    "url": str(art.get("url") or ""),
+                    "published_at": pub_iso,
+                    "published_ts": pub_ts,
+                    **classification,
+                }
+                impact = abs(float(row.get("impact_score") or 0.0))
+                vader = abs(float(row.get("sentiment_compound") or 0.0))
+                row["significance_score"] = round(max(0.0, min(100.0, impact * 1.5 + vader * 20.0 + 8.0)), 2)
+                sig = row["significance_score"]
+                row["significance_band"] = "high" if sig >= 55 else "medium" if sig >= 35 else "low"
+                out.append(row)
+        except Exception:
+            continue
+
+    out = _dedupe_headline_items(out)
+    out.sort(key=lambda h: h.get("published_ts") or 0)
+    out = [h for h in out if float(h.get("significance_score") or 0.0) >= 35.0][:400]
+    _HISTORICAL_EVENTS_CACHE["data"] = out
+    _HISTORICAL_EVENTS_CACHE["expires_at"] = now + timedelta(hours=12)
+    return out
 
 
 def _fred_row(rows: List[Dict[str, Any]], series_id: str) -> Dict[str, Any]:
@@ -1092,12 +1239,16 @@ async def dashboard(response: Response) -> Dict[str, Any]:
                 )
             )
 
-        interest_rates, tax_metrics, activity_metrics, headlines = await asyncio.gather(
+        interest_rates, tax_metrics, activity_metrics, headline_payload, historical_events = await asyncio.gather(
             _fetch_fred_group(client, INTEREST_RATE_SERIES, history_limit=None),
             _fetch_fred_group(client, TAX_FRED_SERIES, history_limit=None),
             _fetch_fred_group(client, ACTIVITY_FRED_SERIES, history_limit=None),
             fetch_headlines(client),
+            fetch_historical_news_events(client),
         )
+        headlines = headline_payload.get("recent", [])
+        headline_events = _dedupe_headline_items([*historical_events, *headline_payload.get("events", [])])
+        headline_events.sort(key=lambda h: h.get("published_ts") or 0)
 
         markets: List[Dict[str, Any]] = []
         for _, metadata in YF_TICKERS.items():
@@ -1138,10 +1289,12 @@ async def dashboard(response: Response) -> Dict[str, Any]:
             "inflation_annual": inflation_compare,
         },
         "headlines": headlines,
+        "headline_events": headline_events,
         "sources": [
             "FRED public CSV endpoints (core macro + rates + fiscal + activity)",
             "US Treasury Fiscal Data API",
             "Yahoo Finance public market data",
-            "Public RSS headlines (Yahoo / CNBC / Fed)",
+            "Public RSS headlines (Yahoo / CNBC / Fed / Reuters / MarketWatch / NYT / IMF)",
+            "GDELT historical news index (cached pull)",
         ],
     }

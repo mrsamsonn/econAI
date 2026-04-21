@@ -5,6 +5,7 @@ import {
   CartesianGrid,
   Line,
   LineChart,
+  ReferenceDot,
   ReferenceLine,
   ResponsiveContainer,
   Tooltip,
@@ -369,6 +370,12 @@ function formatDateFromTs(ts) {
   return new Date(ts).toLocaleDateString(undefined, { month: "short", year: "2-digit", timeZone: "UTC" });
 }
 
+function parseEventTimestamp(value) {
+  if (!value) return NaN;
+  const ts = Date.parse(String(value));
+  return Number.isFinite(ts) ? ts : NaN;
+}
+
 function buildTimeTicksFromData(points, maxTicks = 5) {
   const ts = points
     .map((p) => Number(p.ts))
@@ -519,34 +526,55 @@ function buildHistoricalBiasSeries({ payems, unrate, cpi, gdp, spy, vix }) {
   ).sort();
 
   const out = [];
+  const driverLabel = (name, contribution) => {
+    const supportive = contribution >= 0;
+    if (name === "Payrolls") return supportive ? "payroll momentum supported bias" : "payroll cooling dragged bias";
+    if (name === "Unemployment") return supportive ? "unemployment eased and supported bias" : "unemployment stress dragged bias";
+    if (name === "Inflation") return supportive ? "inflation cooling supported bias" : "inflation shock dragged bias";
+    if (name === "GDP") return supportive ? "real growth supported bias" : "growth weakness dragged bias";
+    if (name === "Equities") return supportive ? "risk appetite supported bias" : "equity weakness dragged bias";
+    if (name === "VIX") return supportive ? "volatility cooling supported bias" : "volatility stress dragged bias";
+    return supportive ? `${name} supported bias` : `${name} dragged bias`;
+  };
   for (const date of allDates) {
     let weighted = 0;
     let wsum = 0;
     let signals = 0;
-    const add = (z, weight) => {
+    const contributions = [];
+    const add = (name, z, weight) => {
       if (!Number.isFinite(z)) return;
-      weighted += z * weight;
+      const contribution = z * weight;
+      weighted += contribution;
       wsum += Math.abs(weight);
       signals += 1;
+      contributions.push({
+        name,
+        contribution,
+      });
     };
 
-    add(payemsZ.get(date), 0.95); // stronger payrolls -> positive
-    add(unrateZ.get(date), -1.05); // higher unemployment -> negative
-    add(cpiYoYZ.get(date), -0.85); // higher inflation shock -> negative
-    add(gdpZ.get(date), 1.1); // stronger real growth -> positive
-    add(spyZ.get(date), 0.8); // risk appetite -> positive
-    add(vixZ.get(date), -0.9); // stress -> negative
+    add("Payrolls", payemsZ.get(date), 0.95); // stronger payrolls -> positive
+    add("Unemployment", unrateZ.get(date), -1.05); // higher unemployment -> negative
+    add("Inflation", cpiYoYZ.get(date), -0.85); // higher inflation shock -> negative
+    add("GDP", gdpZ.get(date), 1.1); // stronger real growth -> positive
+    add("Equities", spyZ.get(date), 0.8); // risk appetite -> positive
+    add("VIX", vixZ.get(date), -0.9); // stress -> negative
 
     if (signals < 3 || wsum <= 0) continue;
     const normalized = weighted / wsum;
     const coverage = signals / 6;
     // Nonlinear mapping yields richer historical regimes than near-linear +/- few points.
     const score = 50 + 44 * Math.tanh(normalized * 1.55) * (0.65 + 0.35 * coverage);
+    const topDrivers = contributions
+      .sort((a, b) => Math.abs(b.contribution) - Math.abs(a.contribution))
+      .slice(0, 2)
+      .map((d) => driverLabel(d.name, d.contribution));
     out.push({
       date,
       ts: Date.parse(`${date}T12:00:00Z`),
       value: Math.max(0, Math.min(100, score)),
       signals,
+      topDrivers,
     });
   }
   return out;
@@ -1061,6 +1089,7 @@ export default function App() {
   const yields = data?.treasury_yields || {};
   const globalCompare = data?.global_compare || {};
   const headlines = data?.headlines ?? EMPTY_HEADLINES;
+  const headlineEvents = data?.headline_events ?? headlines;
   const yieldTenors = ["1m", "3m", "6m", "1y", "2y", "5y", "10y", "30y"];
   const yieldCurveData = yieldTenors.map((tenor) => ({ tenor: tenor.toUpperCase(), value: yields[tenor] }));
 
@@ -1175,6 +1204,204 @@ export default function App() {
     }
     return segments;
   }, [historicalBiasChartSeries]);
+  const historicalBiasEvents = useMemo(() => {
+    if (historicalBiasChartSeries.length < 4) return [];
+    const series = historicalBiasChartSeries;
+
+    const minPoint = series.reduce((min, p) => (Number(p.smoothValue) < Number(min.smoothValue) ? p : min), series[0]);
+    const maxPoint = series.reduce((max, p) => (Number(p.smoothValue) > Number(max.smoothValue) ? p : max), series[0]);
+
+    let sharpDrop = null;
+    let sharpRebound = null;
+    for (let i = 1; i < series.length; i += 1) {
+      const prev = Number(series[i - 1].smoothValue);
+      const curr = Number(series[i].smoothValue);
+      if (!Number.isFinite(prev) || !Number.isFinite(curr)) continue;
+      const delta = curr - prev;
+      if (!sharpDrop || delta < sharpDrop.delta) sharpDrop = { ...series[i], delta };
+      if (!sharpRebound || delta > sharpRebound.delta) sharpRebound = { ...series[i], delta };
+    }
+
+    const candidates = [
+      { id: "low", tag: "Low", ...minPoint },
+      { id: "high", tag: "High", ...maxPoint },
+      sharpDrop ? { id: "drop", tag: "Sharp drop", ...sharpDrop } : null,
+      sharpRebound ? { id: "rebound", tag: "Rebound", ...sharpRebound } : null,
+    ].filter(Boolean);
+
+    const dedup = new Map();
+    for (const c of candidates) {
+      if (!Number.isFinite(Number(c.ts))) continue;
+      const key = Number(c.ts);
+      if (!dedup.has(key)) dedup.set(key, c);
+    }
+    return Array.from(dedup.values()).sort((a, b) => Number(a.ts) - Number(b.ts));
+  }, [historicalBiasChartSeries]);
+  const historicalBiasEventMap = useMemo(() => {
+    const map = new Map();
+    for (const event of historicalBiasEvents) {
+      map.set(Number(event.ts), event);
+    }
+    return map;
+  }, [historicalBiasEvents]);
+  const historicalMacroEvents = useMemo(() => {
+    if (historicalBiasChartSeries.length < 6) return [];
+    const series = historicalBiasChartSeries;
+    const minTs = Number(series[0]?.ts);
+    const maxTs = Number(series[series.length - 1]?.ts);
+    if (!Number.isFinite(minTs) || !Number.isFinite(maxTs)) return [];
+
+    const candidates = headlineEvents
+      .map((h) => {
+        const ts = Number.isFinite(Number(h?.published_ts))
+          ? Number(h?.published_ts)
+          : parseEventTimestamp(h?.published_at);
+        const score = Number.isFinite(Number(h?.significance_score))
+          ? Number(h.significance_score)
+          : Math.abs(Number(h?.impact_score) || 0) * 1.25 + Math.abs(Number(h?.sentiment_compound) || 0) * 18;
+        const title = String(h?.title || "").trim();
+        if (!Number.isFinite(ts) || !title || score < 30) return null;
+        return {
+          id: String(h?.url || `${ts}-${title.slice(0, 32)}`),
+          title,
+          source: String(h?.source || "news"),
+          ts,
+          score,
+          band: String(h?.significance_band || (score >= 55 ? "high" : score >= 35 ? "medium" : "low")),
+        };
+      })
+      .filter(Boolean)
+      .sort((a, b) => a.ts - b.ts);
+
+    const dedupByTitle = new Set();
+    const perYearCount = new Map();
+    const out = [];
+    for (const event of candidates) {
+      const normalizedTitle = event.title.toLowerCase().replace(/[^a-z0-9\s]/g, "").replace(/\s+/g, " ").trim();
+      if (dedupByTitle.has(normalizedTitle)) continue;
+      dedupByTitle.add(normalizedTitle);
+      const year = new Date(event.ts).getUTCFullYear();
+      const yearSeen = perYearCount.get(year) || 0;
+      if (yearSeen >= 3) continue;
+
+      let nearestIdx = -1;
+      let bestDist = Number.POSITIVE_INFINITY;
+      for (let i = 0; i < series.length; i += 1) {
+        const d = Math.abs(Number(series[i].ts) - event.ts);
+        if (d < bestDist) {
+          bestDist = d;
+          nearestIdx = i;
+        }
+      }
+      if (nearestIdx < 0 || bestDist > 1000 * 60 * 60 * 24 * 45) continue;
+
+      const baselineIdx = Math.max(0, nearestIdx - 1);
+      const followIdx = Math.min(series.length - 1, nearestIdx + 3);
+      const baseline = Number(series[baselineIdx]?.smoothValue);
+      const follow = Number(series[followIdx]?.smoothValue);
+      const effectDelta = Number.isFinite(baseline) && Number.isFinite(follow) ? follow - baseline : null;
+      const mappedTs = Number(series[nearestIdx].ts);
+      if (mappedTs < minTs || mappedTs > maxTs) continue;
+      perYearCount.set(year, yearSeen + 1);
+      out.push({
+        id: event.id,
+        label: `${event.source}: ${event.title}`.slice(0, 140),
+        ts: mappedTs,
+        smoothValue: Number(series[nearestIdx].smoothValue),
+        effectDelta,
+        significanceScore: event.score,
+        significanceBand: event.band,
+      });
+    }
+    return out.slice(0, 40).sort((a, b) => Number(a.ts) - Number(b.ts));
+  }, [historicalBiasChartSeries, headlineEvents]);
+  const historicalDataEvents = useMemo(() => {
+    if (historicalBiasChartSeries.length < 6) return [];
+    const series = historicalBiasChartSeries;
+    const minTs = Number(series[0]?.ts);
+    const maxTs = Number(series[series.length - 1]?.ts);
+    if (!Number.isFinite(minTs) || !Number.isFinite(maxTs)) return [];
+
+    const econById = new Map(economy.map((r) => [r.series_id, normalizeHistoryRows(r.history)]));
+    const usrec = econById.get("USREC") || [];
+    const cpi = econById.get("CPIAUCSL") || [];
+    const fed = econById.get("FEDFUNDS") || [];
+
+    const candidates = [];
+    for (let i = 1; i < usrec.length; i += 1) {
+      const prev = Number(usrec[i - 1].value);
+      const curr = Number(usrec[i].value);
+      if (!Number.isFinite(prev) || !Number.isFinite(curr)) continue;
+      if (prev < 0.5 && curr >= 0.5) candidates.push({ date: usrec[i].date, label: "NBER recession start", band: "high" });
+      if (prev >= 0.5 && curr < 0.5) candidates.push({ date: usrec[i].date, label: "NBER recession end", band: "medium" });
+    }
+
+    const cpiYoY = toYoY(cpi);
+    for (const p of cpiYoY) {
+      const v = Number(p.value);
+      if (!Number.isFinite(v)) continue;
+      if (v >= 6) candidates.push({ date: p.date, label: `Inflation shock (${formatNumber(v, 1)}% YoY)`, band: "high" });
+    }
+
+    for (let i = 6; i < fed.length; i += 1) {
+      const curr = Number(fed[i].value);
+      const prev = Number(fed[i - 6].value);
+      if (!Number.isFinite(curr) || !Number.isFinite(prev)) continue;
+      const ch = curr - prev;
+      if (ch >= 1.5) candidates.push({ date: fed[i].date, label: `Fed hiking regime (+${formatNumber(ch, 2)} in 6m)`, band: "medium" });
+    }
+
+    const out = [];
+    for (const ev of candidates) {
+      const ts = Date.parse(`${ev.date}T12:00:00Z`);
+      if (!Number.isFinite(ts) || ts < minTs || ts > maxTs) continue;
+      let nearestIdx = -1;
+      let bestDist = Number.POSITIVE_INFINITY;
+      for (let i = 0; i < series.length; i += 1) {
+        const d = Math.abs(Number(series[i].ts) - ts);
+        if (d < bestDist) {
+          bestDist = d;
+          nearestIdx = i;
+        }
+      }
+      if (nearestIdx < 0 || bestDist > 1000 * 60 * 60 * 24 * 75) continue;
+      out.push({
+        id: `data-${ev.date}-${ev.label}`,
+        label: ev.label,
+        ts: Number(series[nearestIdx].ts),
+        smoothValue: Number(series[nearestIdx].smoothValue),
+        effectDelta: null,
+        significanceScore: ev.band === "high" ? 70 : 50,
+        significanceBand: ev.band,
+      });
+    }
+    return out
+      .sort((a, b) => Number(a.ts) - Number(b.ts))
+      .filter((ev, idx, arr) => idx === 0 || Number(ev.ts) - Number(arr[idx - 1].ts) > 1000 * 60 * 60 * 24 * 75)
+      .slice(0, 35);
+  }, [historicalBiasChartSeries, economy]);
+  const historicalMacroEventsMerged = useMemo(() => {
+    const all = [...historicalDataEvents, ...historicalMacroEvents];
+    const seen = new Set();
+    return all
+      .sort((a, b) => Number(a.ts) - Number(b.ts))
+      .filter((ev) => {
+        const k = `${Math.round(Number(ev.ts) / (1000 * 60 * 60 * 24 * 30))}|${String(ev.label).toLowerCase().slice(0, 42)}`;
+        if (seen.has(k)) return false;
+        seen.add(k);
+        return true;
+      })
+      .slice(0, 55);
+  }, [historicalDataEvents, historicalMacroEvents]);
+  const historicalMacroEventMap = useMemo(() => {
+    const map = new Map();
+    for (const event of historicalMacroEventsMerged) {
+      const key = Number(event.ts);
+      if (!map.has(key)) map.set(key, []);
+      map.get(key).push(event);
+    }
+    return map;
+  }, [historicalMacroEventsMerged]);
 
   const extraCharts = useMemo(() => {
     const pick = (rows, seriesId, title) => {
@@ -1332,7 +1559,34 @@ export default function App() {
                       <Tooltip
                         {...CHART_TOOLTIP_PROPS}
                         cursor={CHART_LINE_TOOLTIP_CURSOR}
-                        labelFormatter={formatDateFromTs}
+                        labelFormatter={(label, payload) => {
+                          const point = payload?.[0]?.payload;
+                          const pointTs = Number(point?.ts);
+                          const event = historicalBiasEventMap.get(pointTs);
+                          const macroEvents = historicalMacroEventMap.get(pointTs) || [];
+                          if (!event && !macroEvents.length) return formatDateFromTs(label);
+                          const chunks = [formatDateFromTs(label)];
+                          const drivers =
+                            Array.isArray(event?.topDrivers) && event.topDrivers.length
+                              ? ` · ${event.topDrivers.join("; ")}`
+                              : "";
+                          if (event) chunks.push(`${event.tag}${drivers}`);
+                          if (macroEvents.length) {
+                            const eventText = macroEvents
+                              .map((e) => {
+                                const deltaText = Number.isFinite(e.effectDelta)
+                                  ? ` (${e.effectDelta >= 0 ? "+" : ""}${formatNumber(e.effectDelta, 1)} bias pts, ~3m)`
+                                  : "";
+                                const sigText = Number.isFinite(Number(e.significanceScore))
+                                  ? ` [${e.significanceBand || "sig"} ${formatNumber(e.significanceScore, 0)}]`
+                                  : "";
+                                return `${e.label}${sigText}${deltaText}`;
+                              })
+                              .join(" | ");
+                            chunks.push(`News event: ${eventText}`);
+                          }
+                          return chunks.join(" · ");
+                        }}
                         formatter={(v, _n, p) => [`${formatNumber(v, 1)} / 100`, `Bias score trend (signals: ${p?.payload?.signals ?? "n/a"})`]}
                       />
                       <Line type="monotone" dataKey="smoothValue" stroke="transparent" strokeWidth={0} dot={false} />
@@ -1345,6 +1599,32 @@ export default function App() {
                           ]}
                           stroke={segment.stroke}
                           strokeWidth={segment.strokeWidth}
+                        />
+                      ))}
+                      {historicalBiasEvents.map((event) => (
+                        <ReferenceDot
+                          key={`bias-event-${event.id}-${event.ts}`}
+                          x={event.ts}
+                          y={event.smoothValue}
+                          r={4.6}
+                          fill="#f3f8ff"
+                          stroke="#6ba8ff"
+                          strokeWidth={2}
+                          className="bias-event-dot"
+                          ifOverflow="visible"
+                        />
+                      ))}
+                      {historicalMacroEventsMerged.map((event) => (
+                        <ReferenceDot
+                          key={`macro-event-${event.id}-${event.ts}`}
+                          x={event.ts}
+                          y={event.smoothValue}
+                          r={5.3}
+                          fill="#ffe5a8"
+                          stroke="#f0a84b"
+                          strokeWidth={2}
+                          className="us-event-dot"
+                          ifOverflow="visible"
                         />
                       ))}
                     </LineChart>
