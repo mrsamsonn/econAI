@@ -1011,7 +1011,7 @@ export default function App() {
   const [data, setData] = useState(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
-  const [timeline, setTimeline] = useState("1Y");
+  const [timeline, setTimeline] = useState("ALL");
   const [expandedChart, setExpandedChart] = useState(null);
   const [pulseDriversOpen, setPulseDriversOpen] = useState(false);
   const [lastSyncAt, setLastSyncAt] = useState(null);
