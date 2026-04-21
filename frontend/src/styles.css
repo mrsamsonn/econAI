@@ -143,6 +143,7 @@ body {
   display: flex;
   flex-direction: column;
   gap: 12px;
+  min-width: 0;
 }
 
 .below-section {
@@ -442,7 +443,12 @@ body {
 
 .chart-wrap {
   width: 100%;
-  height: 200px;
+  min-height: 0;
+}
+
+/* Global compare sits in a narrow column — keep charts from spilling past the card edge */
+.card-global .chart-wrap {
+  max-width: 100%;
 }
 
 .ghost-btn {
@@ -592,11 +598,15 @@ body {
 .compare-grid {
   display: grid;
   grid-template-columns: 1fr;
-  gap: 10px;
+  gap: 8px;
+  min-width: 0;
+}
+
+.compare-grid > div {
+  min-width: 0;
 }
 
 .card-span-2,
-.card-timeline,
 .card-macro,
 .card-markets,
 .card-yield,
@@ -606,10 +616,38 @@ body {
   grid-area: auto;
 }
 
-.timeline-controls {
+.timeline-strip {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  margin: 10px 0 12px;
+  padding: 5px 10px 6px;
+  border-radius: 8px;
+  border: 1px solid rgba(47, 64, 88, 0.45);
+  background: rgba(12, 18, 28, 0.55);
+}
+
+.timeline-strip-label {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: #5d6f8a;
+  flex-shrink: 0;
+}
+
+.timeline-strip-pills {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px;
+  gap: 5px;
+  align-items: center;
+  min-width: 0;
+}
+
+.timeline-strip .timeline-btn {
+  padding: 2px 7px;
+  font-size: 10px;
 }
 
 .timeline-btn {
@@ -676,7 +714,7 @@ body {
   .layout-left {
     grid-column: span 2;
     display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 12px;
   }
 }
@@ -814,19 +852,6 @@ body {
 
 .sk-w-long {
   width: min(100%, 72%);
-}
-
-.skeleton-pills {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin-bottom: 8px;
-}
-
-.sk-pill {
-  width: 44px;
-  height: 28px;
-  border-radius: 8px;
 }
 
 .skeleton-yield-grid {

@@ -135,6 +135,30 @@ function Card({ title, children, className = "" }) {
   );
 }
 
+function TimelineStrip({ value, onChange }) {
+  return (
+    <div
+      className="timeline-strip"
+      role="toolbar"
+      aria-label="History window for macro and market trend charts"
+    >
+      <span className="timeline-strip-label">Timeline</span>
+      <div className="timeline-strip-pills">
+        {TIMELINE_OPTIONS.map((opt) => (
+          <button
+            key={opt}
+            type="button"
+            className={`timeline-btn ${value === opt ? "active" : ""}`}
+            onClick={() => onChange(opt)}
+          >
+            {opt}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 /** Lightweight placeholder layout (CSS opacity pulse only — no charts or timers). */
 function DashboardSkeleton() {
   return (
@@ -160,16 +184,6 @@ function DashboardSkeleton() {
 
       <section className="layout-columns">
         <div className="layout-col layout-left">
-          <section className="card card-timeline">
-            <div className="sk sk-card-title" />
-            <div className="skeleton-pills">
-              {[1, 2, 3, 4, 5, 6].map((i) => (
-                <div key={i} className="sk sk-pill" />
-              ))}
-            </div>
-            <div className="sk sk-line sk-line-sub" />
-          </section>
-
           <section className="card card-yield">
             <div className="sk sk-card-title sk-w-medium" />
             <div className="skeleton-yield-grid">
@@ -718,24 +732,10 @@ export default function App() {
             </section>
           )}
 
+          <TimelineStrip value={timeline} onChange={setTimeline} />
+
           <section className="layout-columns">
         <div className="layout-col layout-left">
-          <Card title="Timeline" className="card-timeline">
-            <div className="timeline-controls">
-              {TIMELINE_OPTIONS.map((opt) => (
-                <button
-                  key={opt}
-                  type="button"
-                  className={`timeline-btn ${timeline === opt ? "active" : ""}`}
-                  onClick={() => setTimeline(opt)}
-                >
-                  {opt}
-                </button>
-              ))}
-            </div>
-            <p className="sub">Applies to macro + market trend charts.</p>
-          </Card>
-
           <Card title="Treasury Yield Curve" className="card-yield">
             <div className="yield-grid">
               {["1m", "3m", "6m", "1y", "2y", "5y", "10y", "30y"].map((tenor) => (
@@ -770,8 +770,8 @@ export default function App() {
               <div className="sub">Nominal GDP (current USD) - last reported</div>
               <div className="metric-hint">{getMetricPreference("GDP_COMPARE")}</div>
               <div className="chart-wrap">
-                <ResponsiveContainer width="100%" height={250}>
-                  <BarChart data={gdpBars} margin={{ top: 8, right: 8, left: 8, bottom: 20 }}>
+                <ResponsiveContainer width="100%" height={200}>
+                  <BarChart data={gdpBars} margin={{ top: 6, right: 6, left: 4, bottom: 16 }}>
                     <CartesianGrid strokeDasharray="3 3" stroke="#223046" />
                     <XAxis
                       dataKey="country"
@@ -798,8 +798,8 @@ export default function App() {
               <div className="sub">Inflation rate (% annual) - last reported</div>
               <div className="metric-hint">{getMetricPreference("INFLATION_COMPARE")}</div>
               <div className="chart-wrap">
-                <ResponsiveContainer width="100%" height={250}>
-                  <BarChart data={inflationBars} margin={{ top: 8, right: 8, left: 8, bottom: 20 }}>
+                <ResponsiveContainer width="100%" height={200}>
+                  <BarChart data={inflationBars} margin={{ top: 6, right: 6, left: 4, bottom: 16 }}>
                     <CartesianGrid strokeDasharray="3 3" stroke="#223046" />
                     <XAxis
                       dataKey="country"
