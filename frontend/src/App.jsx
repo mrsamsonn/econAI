@@ -32,6 +32,53 @@ const METRIC_PREFERENCE = {
   INFLATION_COMPARE: "Lower is generally better",
 };
 
+/** Short hover explanations (native `title` tooltips). */
+const METRIC_GLOSSARY = {
+  CPIAUCSL:
+    "Consumer Price Index for All Urban Consumers (seasonally adjusted). Tracks average price changes for a broad basket of consumer goods and services — the main headline CPI inflation gauge.",
+  UNRATE:
+    "Civilian unemployment rate — percent of the labor force that is unemployed and actively seeking work. A key labor-market tightness indicator.",
+  PAYEMS:
+    "Total nonfarm payroll employment — estimated number of jobs in the economy excluding farms, private households, and a few small sectors. A top monthly jobs reading.",
+  GDPC1:
+    "Real Gross Domestic Product (chain-weighted, quarterly, seasonally adjusted annual rate). Inflation-adjusted size of the economy — the core growth yardstick.",
+  FEDFUNDS:
+    "Effective Federal Funds rate — overnight interbank lending rate the FOMC targets. Higher often reflects tighter policy; level must be read with growth and inflation.",
+  ICSA:
+    "Initial jobless claims — weekly count of new unemployment insurance filings. Spikes often align with layoffs or shocks (can be noisy week-to-week).",
+  SPY:
+    "SPDR S&P 500 ETF — tracks the S&P 500 large-cap U.S. equity index. A liquid proxy for broad U.S. stock market price levels.",
+  "^VIX":
+    "CBOE Volatility Index — market-implied volatility on S&P 500 options over the next ~30 days. Often called the “fear gauge”; higher usually means more expected swings.",
+  "DX-Y.NYB":
+    "U.S. Dollar Index (ICE futures proxy on Yahoo). Measures the USD vs a basket of major currencies; strength affects trade, earnings, and global funding conditions.",
+  "CL=F":
+    "WTI crude oil front-month futures — global growth and energy-cost barometer; large moves spill into inflation and consumer spending.",
+  "GC=F":
+    "Gold front-month futures — traditional safe-haven and real-rate sensitive asset; moves with risk appetite, the dollar, and opportunity cost of holding cash/bonds.",
+  "BTC-USD":
+    "Bitcoin in U.S. dollars — high-volatility risk asset; sometimes viewed as a liquidity / sentiment tell, not a macro fundamental like payrolls or GDP.",
+  YIELD_1M: "1-month Treasury yield — very short end; tracks near-term cash rates and policy expectations.",
+  YIELD_3M: "3-month Treasury yield — T-bill sector; sensitive to Fed path and money-market conditions.",
+  YIELD_6M: "6-month Treasury yield — short/intermediate funding rates.",
+  YIELD_1Y: "1-year Treasury yield — bridges money markets and the belly of the curve.",
+  YIELD_2Y: "2-year Treasury yield — highly sensitive to expected Fed policy over the next couple of years.",
+  YIELD_5Y: "5-year Treasury yield — mid-curve; mixes growth, inflation, and rate expectations.",
+  YIELD_10Y: "10-year Treasury yield — benchmark long rate for mortgages, credit spreads, and discounting cash flows.",
+  YIELD_30Y: "30-year Treasury yield — long bond; term premium and long-horizon growth/inflation expectations.",
+};
+
+const YIELD_TENOR_GLOSSARY_KEY = {
+  "1m": "YIELD_1M",
+  "3m": "YIELD_3M",
+  "6m": "YIELD_6M",
+  "1y": "YIELD_1Y",
+  "2y": "YIELD_2Y",
+  "5y": "YIELD_5Y",
+  "10y": "YIELD_10Y",
+  "30y": "YIELD_30Y",
+};
+
 function formatNumber(value, digits = 2) {
   if (value === null || value === undefined || Number.isNaN(value)) return "n/a";
   return Number(value).toLocaleString(undefined, { maximumFractionDigits: digits });
@@ -72,6 +119,16 @@ function getMetricPreference(key) {
   return METRIC_PREFERENCE[key] || "Context dependent";
 }
 
+function glossaryTip(key) {
+  if (!key) return undefined;
+  return METRIC_GLOSSARY[key] || undefined;
+}
+
+function tipForPulseDriverLine(name) {
+  const m = String(name).match(/\(([^)]+)\)\s*$/);
+  return m ? glossaryTip(m[1].trim()) : undefined;
+}
+
 function formatDateLabel(value) {
   if (!value) return "";
   const date = new Date(value);
@@ -103,12 +160,15 @@ function attachTimestamps(points) {
   }));
 }
 
-function TrendChart({ title, data, yLabel, onExpand, preference }) {
+function TrendChart({ title, data, yLabel, onExpand, preference, glossaryKey }) {
   const domain = getDynamicDomain(data.map((d) => Number(d.value)));
+  const tip = glossaryTip(glossaryKey);
   return (
     <div className="chart-block">
       <div className="chart-head">
-        <div className="sub">{title}</div>
+        <div className={tip ? "sub metric-tip" : "sub"} title={tip || undefined}>
+          {title}
+        </div>
         <button className="ghost-btn" onClick={onExpand} type="button">
           Expand
         </button>
@@ -339,7 +399,11 @@ export default function App() {
               {pulseDriversOpen && (
                 <ul className="pulse-components" id="pulse-drivers-list" aria-labelledby="pulse-drivers-toggle">
                   {data.us_economy_direction.components.map((c) => (
-                    <li key={c.name}>
+                    <li
+                      key={c.name}
+                      className={tipForPulseDriverLine(c.name) ? "metric-tip" : undefined}
+                      title={tipForPulseDriverLine(c.name)}
+                    >
                       <strong>{c.name}</strong>{" "}
                       <span className={c.delta >= 0 ? "delta-pos" : "delta-neg"}>
                         ({c.delta >= 0 ? "+" : ""}
@@ -376,7 +440,11 @@ export default function App() {
           <Card title="Treasury Yield Curve" className="card-yield">
             <div className="yield-grid">
               {["1m", "3m", "6m", "1y", "2y", "5y", "10y", "30y"].map((tenor) => (
-                <div key={tenor} className="yield-item">
+                <div
+                  key={tenor}
+                  className={`yield-item${glossaryTip(YIELD_TENOR_GLOSSARY_KEY[tenor]) ? " metric-tip" : ""}`}
+                  title={glossaryTip(YIELD_TENOR_GLOSSARY_KEY[tenor])}
+                >
                   <span>{tenor.toUpperCase()}</span>
                   <strong>{formatNumber(yields[tenor])}%</strong>
                 </div>
@@ -461,7 +529,12 @@ export default function App() {
             {economy.map((item) => (
               <div key={item.series_id} className="row">
                 <div>
-                  <strong>{item.label}</strong>
+                  <strong
+                    className={glossaryTip(item.series_id) ? "metric-tip" : undefined}
+                    title={glossaryTip(item.series_id)}
+                  >
+                    {item.label}
+                  </strong>
                   <div className="sub">{item.latest_date || item.error}</div>
                   <div className="metric-hint">{getMetricPreference(item.series_id)}</div>
                 </div>
@@ -480,6 +553,7 @@ export default function App() {
                 data={chart.data}
                 yLabel="Value axis (Y) over time (X)"
                 preference={getMetricPreference(chart.key)}
+                glossaryKey={chart.key}
                 onExpand={() => setExpandedChart(chart.key)}
               />
             ))}
@@ -493,7 +567,12 @@ export default function App() {
               {markets.map((item) => (
                 <div key={item.symbol} className="row">
                   <div>
-                    <strong>{item.label}</strong>
+                    <strong
+                      className={glossaryTip(item.symbol) ? "metric-tip" : undefined}
+                      title={glossaryTip(item.symbol)}
+                    >
+                      {item.label}
+                    </strong>
                     <div className="sub">{item.symbol}</div>
                     <div className="metric-hint">{getMetricPreference(item.symbol)}</div>
                   </div>
@@ -512,6 +591,7 @@ export default function App() {
                   data={chart.data}
                   yLabel="Price axis (Y) over time (X)"
                   preference={getMetricPreference(chart.key)}
+                  glossaryKey={chart.key}
                   onExpand={() => setExpandedChart(chart.key)}
                 />
               ))}
@@ -550,7 +630,12 @@ export default function App() {
         <div className="modal-backdrop" onClick={() => setExpandedChart(null)} role="presentation">
           <div className="modal-card" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true">
             <div className="modal-head">
-              <h3>{expandedChartData.title}</h3>
+              <h3
+                className={glossaryTip(expandedChartData.key) ? "metric-tip" : undefined}
+                title={glossaryTip(expandedChartData.key)}
+              >
+                {expandedChartData.title}
+              </h3>
               <button className="ghost-btn" onClick={() => setExpandedChart(null)} type="button">
                 Back
               </button>

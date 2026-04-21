@@ -283,6 +283,10 @@ body {
   margin-top: 2px;
 }
 
+.metric-tip {
+  cursor: help;
+}
+
 .pill {
   font-size: 12px;
   border-radius: 999px;
