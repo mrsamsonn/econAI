@@ -12,7 +12,15 @@ import {
 } from "recharts";
 
 const API_BASE = import.meta.env.VITE_API_BASE || "http://127.0.0.1:8000";
-const REFRESH_MS = 60_000;
+const STATUS_TICK_MS = 1_000;
+/** One dashboard pull hits many upstream URLs (FRED CSV, Yahoo, RSS). Keep a safe floor. */
+const MIN_DATA_REFRESH_MS = 60_000;
+const MAX_DATA_REFRESH_MS = 300_000;
+const _refreshParsed = Number(import.meta.env.VITE_DATA_REFRESH_MS);
+const DATA_REFRESH_MS =
+  Number.isFinite(_refreshParsed) && _refreshParsed > 0
+    ? Math.min(MAX_DATA_REFRESH_MS, Math.max(MIN_DATA_REFRESH_MS, _refreshParsed))
+    : MIN_DATA_REFRESH_MS;
 const TIMELINE_OPTIONS = ["1M", "3M", "YTD", "1Y", "5Y", "ALL"];
 const METRIC_PREFERENCE = {
   CPIAUCSL: "Lower is generally better",
@@ -210,6 +218,22 @@ function sentimentClass(color) {
   return "sentiment yellow";
 }
 
+function formatSyncAge(msAgo) {
+  if (msAgo == null || Number.isNaN(msAgo)) return "";
+  if (msAgo < 1500) return "just now";
+  const s = Math.floor(msAgo / 1000);
+  if (s < 60) return `${s}s ago`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ${s % 60}s ago`;
+  const h = Math.floor(m / 60);
+  return `${h}h ago`;
+}
+
+/** Wall-clock in UTC for live display (`Date.now()` is always rendered as UTC via ISO). */
+function formatUtcClock(ms) {
+  return new Date(ms).toISOString().replace("T", " ").slice(0, 19);
+}
+
 function getDynamicDomain(values, paddingRatio = 0.08) {
   const cleaned = values.filter((v) => Number.isFinite(v));
   if (!cleaned.length) return [0, 1];
@@ -231,6 +255,13 @@ export default function App() {
   const [timeline, setTimeline] = useState("1Y");
   const [expandedChart, setExpandedChart] = useState(null);
   const [pulseDriversOpen, setPulseDriversOpen] = useState(false);
+  const [lastSyncAt, setLastSyncAt] = useState(null);
+  const [tick, setTick] = useState(0);
+
+  useEffect(() => {
+    const id = setInterval(() => setTick((n) => n + 1), STATUS_TICK_MS);
+    return () => clearInterval(id);
+  }, []);
 
   useEffect(() => {
     let timer;
@@ -246,6 +277,7 @@ export default function App() {
         const payload = await response.json();
         setData(payload);
         setError("");
+        setLastSyncAt(Date.now());
       } catch (err) {
         setError(err.message || "Failed to load dashboard");
       } finally {
@@ -254,9 +286,26 @@ export default function App() {
     }
 
     load();
-    timer = setInterval(load, REFRESH_MS);
+    timer = setInterval(load, DATA_REFRESH_MS);
     return () => clearInterval(timer);
   }, []);
+
+  const clockNow = useMemo(() => Date.now(), [tick, lastSyncAt]);
+  const ageMs = lastSyncAt != null ? clockNow - lastSyncAt : null;
+  const lastUpdateSuffix = useMemo(() => {
+    if (data?.updated_at == null) return "";
+    return ` · Last update: ${new Date(data.updated_at).toLocaleString()}`;
+  }, [data?.updated_at]);
+  const statusTone =
+    error && !data
+      ? "bad"
+      : error
+        ? "warn"
+        : ageMs == null
+          ? "idle"
+          : ageMs > DATA_REFRESH_MS * 3
+            ? "warn"
+            : "ok";
 
   const economy = useMemo(() => data?.economy || [], [data]);
   const markets = useMemo(() => data?.markets || [], [data]);
@@ -319,16 +368,38 @@ export default function App() {
 
   return (
     <main className="page">
+      <div className="monitor-status-bar" role="status" aria-live="polite">
+        <span className={`monitor-dot monitor-dot--${statusTone}`} aria-hidden />
+        <span className="monitor-label">Live monitor</span>
+        <span className="monitor-detail">
+          {lastSyncAt == null && loading
+            ? "Connecting…"
+            : lastSyncAt == null
+              ? "No sync yet"
+              : error
+                ? `Last good sync ${formatSyncAge(ageMs)} · ${error}${lastUpdateSuffix}`
+                : `Data synced ${formatSyncAge(ageMs)} · pulls every ${DATA_REFRESH_MS / 1000}s${lastUpdateSuffix}`}
+        </span>
+        <div className="monitor-meta">
+          <time
+            className="monitor-utc"
+            dateTime={new Date(clockNow).toISOString()}
+            aria-label="Current time in UTC"
+          >
+            {formatUtcClock(clockNow)} UTC
+          </time>
+          <span
+            className="monitor-hint"
+            title={`Status text refreshes every 1s. Set VITE_DATA_REFRESH_MS in .env for pull interval (${MIN_DATA_REFRESH_MS}–${MAX_DATA_REFRESH_MS} ms).`}
+          >
+            1s clock · {DATA_REFRESH_MS / 1000}s pulls
+          </span>
+        </div>
+      </div>
+
       <header className="top">
         <div>
           <h1>US Economy Live Monitor</h1>
-          <p>
-            Real-time-ish pulse of macro + market conditions using free data APIs.
-            Refreshes every 60 seconds.
-          </p>
-          {data?.updated_at && (
-            <small>Last update: {new Date(data.updated_at).toLocaleString()}</small>
-          )}
         </div>
         <div className="top-sources">
           <strong>Sources</strong>
