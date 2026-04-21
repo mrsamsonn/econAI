@@ -272,6 +272,126 @@ async def fetch_headlines(client: httpx.AsyncClient) -> List[Dict[str, str]]:
     return results[:12]
 
 
+def _fred_row(rows: List[Dict[str, Any]], series_id: str) -> Dict[str, Any]:
+    for row in rows:
+        if row.get("series_id") == series_id:
+            return row
+    return {}
+
+
+def _market_row(markets: List[Dict[str, Any]], symbol: str) -> Dict[str, Any]:
+    for row in markets:
+        if row.get("symbol") == symbol:
+            return row
+    return {}
+
+
+def compute_us_economy_direction(
+    economy: List[Dict[str, Any]],
+    treasury_yields: Dict[str, Any],
+    markets: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """
+    Heuristic 0–100 pulse from public series already on the dashboard.
+    Not a forecast — a compact read of recent momentum + yield curve shape.
+    """
+    components: List[Dict[str, Any]] = []
+    score = 50.0
+
+    def add_component(name: str, delta: float, detail: str) -> None:
+        nonlocal score
+        score += delta
+        components.append({"name": name, "delta": round(delta, 1), "detail": detail})
+
+    payems = _fred_row(economy, "PAYEMS")
+    if payems.get("change") is not None:
+        ch = float(payems["change"])
+        if ch > 0:
+            add_component("Payrolls (PAYEMS)", 8, "Payrolls rose vs prior print")
+        elif ch < 0:
+            add_component("Payrolls (PAYEMS)", -8, "Payrolls fell vs prior print")
+
+    unrate = _fred_row(economy, "UNRATE")
+    if unrate.get("change") is not None:
+        ch = float(unrate["change"])
+        if ch < 0:
+            add_component("Unemployment (UNRATE)", 8, "Unemployment rate edged down")
+        elif ch > 0:
+            add_component("Unemployment (UNRATE)", -8, "Unemployment rate rose")
+
+    icsa = _fred_row(economy, "ICSA")
+    if icsa.get("change") is not None:
+        ch = float(icsa["change"])
+        if ch < 0:
+            add_component("Jobless claims (ICSA)", 6, "Initial claims declined vs prior week")
+        elif ch > 0:
+            add_component("Jobless claims (ICSA)", -6, "Initial claims rose vs prior week")
+
+    gdp = _fred_row(economy, "GDPC1")
+    if gdp.get("change") is not None:
+        ch = float(gdp["change"])
+        if ch > 0:
+            add_component("Real GDP (GDPC1)", 10, "Real GDP rose vs prior quarter")
+        elif ch < 0:
+            add_component("Real GDP (GDPC1)", -12, "Real GDP contracted vs prior quarter")
+
+    cpi = _fred_row(economy, "CPIAUCSL")
+    if cpi.get("pct_change") is not None:
+        pc = float(cpi["pct_change"])
+        if pc > 0.35:
+            add_component("CPI (CPIAUCSL)", -4, "MoM CPI increase looks firm")
+        elif pc < -0.05:
+            add_component("CPI (CPIAUCSL)", 3, "MoM CPI cooled vs prior month")
+
+    y10 = treasury_yields.get("10y")
+    y2 = treasury_yields.get("2y")
+    if y10 is not None and y2 is not None:
+        spread = float(y10) - float(y2)
+        if spread < -0.1:
+            add_component("Yield curve (10Y − 2Y)", -14, "Curve inverted — classic late-cycle signal")
+        elif spread < 0.25:
+            add_component("Yield curve (10Y − 2Y)", -4, "Curve is flat — growth doubts")
+        elif spread < 0.75:
+            add_component("Yield curve (10Y − 2Y)", 4, "Curve modestly positive")
+        else:
+            add_component("Yield curve (10Y − 2Y)", 10, "Curve steep — markets pricing better growth / term premium")
+
+    spy = _market_row(markets, "SPY")
+    if spy.get("pct_change") is not None:
+        pc = float(spy["pct_change"])
+        if pc > 0.25:
+            add_component("Risk assets (SPY)", 5, "S&P 500 ETF up vs prior session")
+        elif pc < -0.35:
+            add_component("Risk assets (SPY)", -5, "S&P 500 ETF down vs prior session")
+
+    vix = _market_row(markets, "^VIX")
+    if vix.get("pct_change") is not None:
+        pc = float(vix["pct_change"])
+        if pc < -3:
+            add_component("Volatility (VIX)", 4, "VIX fell — calmer risk pricing")
+        elif pc > 5:
+            add_component("Volatility (VIX)", -5, "VIX jumped — risk-off tone")
+
+    score = max(0.0, min(100.0, score))
+    if score >= 62:
+        verdict = "Expansion bias"
+        band = "positive"
+    elif score <= 38:
+        verdict = "Slowdown / risk bias"
+        band = "negative"
+    else:
+        verdict = "Mixed / transitioning"
+        band = "neutral"
+
+    return {
+        "score": round(score, 1),
+        "verdict": verdict,
+        "band": band,
+        "components": components,
+        "method": "Heuristic blend of latest FRED deltas, 10Y−2Y spread, and SPY/VIX session moves.",
+    }
+
+
 async def fetch_country_series(
     client: httpx.AsyncClient, series_map: Dict[str, Dict[str, str]]
 ) -> List[Dict[str, Any]]:
@@ -326,10 +446,17 @@ async def dashboard(response: Response) -> Dict[str, Any]:
         inflation_compare = await fetch_country_series(client, COUNTRY_CPI_SERIES)
         headlines = await fetch_headlines(client)
 
+    economy_direction = compute_us_economy_direction(
+        economy=fred_data,
+        treasury_yields=treasury_yields if isinstance(treasury_yields, dict) else {},
+        markets=markets,
+    )
+
     return {
         "updated_at": datetime.now(timezone.utc).isoformat(),
         "economy": fred_data,
         "markets": markets,
+        "us_economy_direction": economy_direction,
         "treasury_yields": treasury_yields,
         "fiscal_meta": debt_interest_meta,
         "global_compare": {

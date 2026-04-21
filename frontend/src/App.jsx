@@ -170,6 +170,7 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [timeline, setTimeline] = useState("1Y");
   const [expandedChart, setExpandedChart] = useState(null);
+  const [pulseDriversOpen, setPulseDriversOpen] = useState(false);
 
   useEffect(() => {
     let timer;
@@ -279,6 +280,80 @@ export default function App() {
 
       {loading && <p className="state">Loading dashboard...</p>}
       {error && <p className="state error">{error}</p>}
+
+      {data?.us_economy_direction && (
+        <section className={`economy-pulse pulse-${data.us_economy_direction.band || "neutral"}`}>
+          <div className="pulse-main">
+            <div className="pulse-score-wrap">
+              <span className="pulse-score">{formatNumber(data.us_economy_direction.score, 0)}</span>
+              <span className="pulse-out-of">/ 100</span>
+            </div>
+            <div>
+              <div className="pulse-verdict">{data.us_economy_direction.verdict}</div>
+              <div className="sub">{data.us_economy_direction.method}</div>
+            </div>
+          </div>
+          <div className="pulse-bar-outer" aria-hidden>
+            <div
+              className="pulse-bar-inner"
+              style={{ width: `${Math.min(100, Math.max(0, Number(data.us_economy_direction.score)))}%` }}
+            />
+          </div>
+          <div className="pulse-legend" role="group" aria-label="Economy pulse score bands">
+            <div className="pulse-legend-title">Verdict bands (heuristic score)</div>
+            <ul className="pulse-legend-list">
+              <li>
+                <span className="pulse-legend-swatch swatch-positive" aria-hidden />
+                <span>
+                  <strong>62–100</strong> — Expansion bias
+                </span>
+              </li>
+              <li>
+                <span className="pulse-legend-swatch swatch-neutral" aria-hidden />
+                <span>
+                  <strong>39–61</strong> — Mixed / transitioning
+                </span>
+              </li>
+              <li>
+                <span className="pulse-legend-swatch swatch-negative" aria-hidden />
+                <span>
+                  <strong>0–38</strong> — Slowdown / risk bias
+                </span>
+              </li>
+            </ul>
+          </div>
+          {(data.us_economy_direction.components || []).length > 0 && (
+            <div className="pulse-drivers">
+              <button
+                type="button"
+                className="pulse-drivers-toggle"
+                onClick={() => setPulseDriversOpen((open) => !open)}
+                aria-expanded={pulseDriversOpen}
+                aria-controls="pulse-drivers-list"
+                id="pulse-drivers-toggle"
+              >
+                {pulseDriversOpen
+                  ? "Hide score drivers"
+                  : `Show score drivers (${data.us_economy_direction.components.length})`}
+              </button>
+              {pulseDriversOpen && (
+                <ul className="pulse-components" id="pulse-drivers-list" aria-labelledby="pulse-drivers-toggle">
+                  {data.us_economy_direction.components.map((c) => (
+                    <li key={c.name}>
+                      <strong>{c.name}</strong>{" "}
+                      <span className={c.delta >= 0 ? "delta-pos" : "delta-neg"}>
+                        ({c.delta >= 0 ? "+" : ""}
+                        {c.delta})
+                      </span>
+                      : {c.detail}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
+        </section>
+      )}
 
       <section className="layout-columns">
         <div className="layout-col layout-left">
