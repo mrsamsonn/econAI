@@ -1,4 +1,5 @@
 import asyncio
+import os
 import re
 from datetime import datetime, timedelta, timezone
 from html import unescape
@@ -103,6 +104,12 @@ HEADLINE_SOURCES: List[Dict[str, str]] = [
 
 _VADER = SentimentIntensityAnalyzer()
 _HISTORICAL_EVENTS_CACHE: Dict[str, Any] = {"expires_at": datetime.fromtimestamp(0, tz=timezone.utc), "data": []}
+_FRED_API_KEY = os.getenv("FRED_API_KEY", "").strip()
+_FRED_SERIES_CACHE: Dict[str, Dict[str, Any]] = {}
+_FRED_CACHE_TTL_SECONDS = 60 * 30
+_FRED_STALE_MAX_SECONDS = 60 * 60 * 24 * 14
+_FRED_RETRY_ATTEMPTS = 3
+_FRED_RETRY_BASE_DELAY_SECONDS = 1.2
 
 # RSS `content:encoded` expanded tag (namespaces collapsed by ElementTree).
 _RSS_CONTENT_ENCODED = "{http://purl.org/rss/1.0/modules/content/}encoded"
@@ -212,19 +219,17 @@ _NEGATIVE_LEXICON: List[Tuple[str, float]] = [
 async def fetch_fred_series(
     client: httpx.AsyncClient, series_id: str, label: str, history_limit: Optional[int] = 240
 ) -> Dict[str, Any]:
-    url = f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={series_id}"
-    try:
-        response = await client.get(url, timeout=20)
-        response.raise_for_status()
-        df = pd.read_csv(StringIO(response.text))
-        date_col = "DATE" if "DATE" in df.columns else "observation_date"
-        df = df.rename(columns={series_id: "value", date_col: "date"})
-        df["value"] = pd.to_numeric(df["value"], errors="coerce")
-        df = df.dropna(subset=["value"])
+    cache_key = f"{series_id}:{history_limit}"
+    now = datetime.now(timezone.utc)
+    cached = _FRED_SERIES_CACHE.get(cache_key)
+    if cached:
+        age = (now - cached["fetched_at"]).total_seconds()
+        if age <= _FRED_CACHE_TTL_SECONDS:
+            return dict(cached["payload"])
 
+    def _build_payload(df: pd.DataFrame, source: str) -> Dict[str, Any]:
         if df.empty:
             return {"series_id": series_id, "label": label, "error": "No data returned"}
-
         latest = df.iloc[-1]
         prev = df.iloc[-2] if len(df) > 1 else None
         change = float(latest["value"] - prev["value"]) if prev is not None else None
@@ -233,10 +238,8 @@ async def fetch_fred_series(
             if prev is not None and prev["value"] != 0
             else None
         )
-
         history_df = df if history_limit is None else df.tail(history_limit)
-
-        return {
+        out = {
             "series_id": series_id,
             "label": label,
             "latest_date": str(latest["date"]),
@@ -244,8 +247,77 @@ async def fetch_fred_series(
             "change": change,
             "pct_change": pct_change,
             "history": history_df.to_dict(orient="records"),
+            "source": source,
         }
+        _FRED_SERIES_CACHE[cache_key] = {"payload": out, "fetched_at": now}
+        return out
+
+    async def _fetch_via_api() -> Optional[Dict[str, Any]]:
+        if not _FRED_API_KEY:
+            return None
+        api_url = "https://api.stlouisfed.org/fred/series/observations"
+        params = {"series_id": series_id, "api_key": _FRED_API_KEY, "file_type": "json", "sort_order": "asc"}
+        resp = await client.get(api_url, params=params, timeout=20)
+        resp.raise_for_status()
+        payload = resp.json()
+        obs = payload.get("observations", [])
+        rows = []
+        for o in obs:
+            v = pd.to_numeric(o.get("value"), errors="coerce")
+            if pd.isna(v):
+                continue
+            rows.append({"date": str(o.get("date")), "value": float(v)})
+        if not rows:
+            return None
+        df = pd.DataFrame(rows)
+        return _build_payload(df, "fred_api")
+
+    def _is_retryable(exc: Exception) -> bool:
+        if isinstance(exc, (httpx.TimeoutException, httpx.NetworkError)):
+            return True
+        if isinstance(exc, httpx.HTTPStatusError):
+            code = exc.response.status_code
+            return code in {403, 408, 409, 425, 429, 500, 502, 503, 504}
+        return False
+
+    async def _with_retries(fetcher):
+        last_exc: Optional[Exception] = None
+        for attempt in range(_FRED_RETRY_ATTEMPTS):
+            try:
+                return await fetcher()
+            except Exception as exc:
+                last_exc = exc
+                if attempt >= _FRED_RETRY_ATTEMPTS - 1 or not _is_retryable(exc):
+                    raise
+                await asyncio.sleep(_FRED_RETRY_BASE_DELAY_SECONDS * (2 ** attempt))
+        if last_exc:
+            raise last_exc
+
+    async def _fetch_via_csv() -> Dict[str, Any]:
+        url = f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={series_id}"
+        response = await client.get(url, timeout=20)
+        response.raise_for_status()
+        df = pd.read_csv(StringIO(response.text))
+        date_col = "DATE" if "DATE" in df.columns else "observation_date"
+        df = df.rename(columns={series_id: "value", date_col: "date"})
+        df["value"] = pd.to_numeric(df["value"], errors="coerce")
+        df = df.dropna(subset=["value"])
+        return _build_payload(df, "fred_csv")
+
+    try:
+        via_api = await _with_retries(_fetch_via_api)
+        if via_api is not None:
+            return via_api
+        return await _with_retries(_fetch_via_csv)
     except Exception as exc:
+        if cached:
+            stale_age = (now - cached["fetched_at"]).total_seconds()
+            if stale_age <= _FRED_STALE_MAX_SECONDS:
+                stale_payload = dict(cached["payload"])
+                stale_payload["stale"] = True
+                stale_payload["stale_reason"] = str(exc)
+                stale_payload["stale_age_seconds"] = int(stale_age)
+                return stale_payload
         return {"series_id": series_id, "label": label, "error": str(exc)}
 
 
@@ -1273,6 +1345,9 @@ async def dashboard(response: Response) -> Dict[str, Any]:
         activity_metrics=activity_metrics,
         headlines=headlines,
     )
+    fred_rows_all = [*fred_data, *interest_rates, *tax_metrics, *activity_metrics]
+    fred_error_count = sum(1 for row in fred_rows_all if isinstance(row, dict) and row.get("error"))
+    fred_stale_count = sum(1 for row in fred_rows_all if isinstance(row, dict) and row.get("stale"))
 
     return {
         "updated_at": datetime.now(timezone.utc).isoformat(),
@@ -1290,6 +1365,12 @@ async def dashboard(response: Response) -> Dict[str, Any]:
         },
         "headlines": headlines,
         "headline_events": headline_events,
+        "fred_status": {
+            "api_key_configured": bool(_FRED_API_KEY),
+            "series_count": len(fred_rows_all),
+            "error_count": fred_error_count,
+            "stale_count": fred_stale_count,
+        },
         "sources": [
             "FRED public CSV endpoints (core macro + rates + fiscal + activity)",
             "US Treasury Fiscal Data API",

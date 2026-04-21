@@ -5,6 +5,14 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BACKEND_DIR="$ROOT_DIR/backend"
 FRONTEND_DIR="$ROOT_DIR/frontend"
 VENV_ACTIVATE="$BACKEND_DIR/.venv/bin/activate"
+ENV_FILE="$ROOT_DIR/.env"
+
+if [[ -f "$ENV_FILE" ]]; then
+  # shellcheck disable=SC1090
+  set -a
+  source "$ENV_FILE"
+  set +a
+fi
 
 pick_free_port() {
   local start_port="$1"
@@ -22,6 +30,24 @@ for candidate in range(port, port + 200):
 
 raise SystemExit(1)
 PY
+}
+
+kill_stale_listener() {
+  local port="$1"
+  local pids
+  pids="$(lsof -tiTCP:"$port" -sTCP:LISTEN 2>/dev/null || true)"
+  if [[ -z "$pids" ]]; then
+    return 0
+  fi
+  echo "Found stale listener(s) on :$port -> $pids; terminating..."
+  # shellcheck disable=SC2086
+  kill $pids 2>/dev/null || true
+  sleep 1
+  if lsof -tiTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1; then
+    echo "Force-killing stubborn listener(s) on :$port ..."
+    # shellcheck disable=SC2086
+    kill -9 $pids 2>/dev/null || true
+  fi
 }
 
 if [[ ! -f "$VENV_ACTIVATE" ]]; then
@@ -50,6 +76,10 @@ trap cleanup EXIT INT TERM
 BACKEND_PORT="$(pick_free_port 8000)"
 FRONTEND_PORT="$(pick_free_port 5173)"
 API_BASE="http://127.0.0.1:${BACKEND_PORT}"
+
+# If previous runs crashed and left listeners around, clear them before boot.
+kill_stale_listener "$BACKEND_PORT"
+kill_stale_listener "$FRONTEND_PORT"
 
 echo "Starting backend on ${API_BASE} ..."
 (
