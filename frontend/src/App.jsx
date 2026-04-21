@@ -79,6 +79,30 @@ function formatDateLabel(value) {
   return date.toLocaleDateString(undefined, { month: "short", year: "2-digit" });
 }
 
+function formatDateFromTs(ts) {
+  if (typeof ts !== "number" || Number.isNaN(ts)) return "";
+  return new Date(ts).toLocaleDateString(undefined, { month: "short", year: "2-digit", timeZone: "UTC" });
+}
+
+function normalizeHistoryRows(history) {
+  if (!Array.isArray(history) || !history.length) return [];
+  if (typeof history[0] === "number") return [];
+  return history
+    .map((h) =>
+      h && typeof h === "object"
+        ? { date: String(h.date).slice(0, 10), value: Number(h.value) }
+        : null
+    )
+    .filter((p) => p && /^[0-9]{4}-[0-9]{2}-[0-9]{2}$/.test(p.date) && Number.isFinite(p.value));
+}
+
+function attachTimestamps(points) {
+  return points.map((p) => ({
+    ...p,
+    ts: Date.parse(`${p.date}T12:00:00Z`),
+  }));
+}
+
 function TrendChart({ title, data, yLabel, onExpand, preference }) {
   const domain = getDynamicDomain(data.map((d) => Number(d.value)));
   return (
@@ -93,7 +117,15 @@ function TrendChart({ title, data, yLabel, onExpand, preference }) {
         <ResponsiveContainer width="100%" height={220}>
           <LineChart data={data}>
             <CartesianGrid strokeDasharray="3 3" stroke="#223046" />
-            <XAxis dataKey="date" stroke="#9cb0cb" tick={{ fontSize: 11 }} tickFormatter={formatDateLabel} minTickGap={28} />
+            <XAxis
+              dataKey="ts"
+              type="number"
+              domain={["dataMin", "dataMax"]}
+              stroke="#9cb0cb"
+              tick={{ fontSize: 11 }}
+              tickFormatter={formatDateFromTs}
+              minTickGap={28}
+            />
             <YAxis
               domain={domain}
               stroke="#9cb0cb"
@@ -101,7 +133,7 @@ function TrendChart({ title, data, yLabel, onExpand, preference }) {
               width={70}
               tickFormatter={formatCompact}
             />
-            <Tooltip formatter={(value) => formatNumber(value)} labelFormatter={formatDateLabel} />
+            <Tooltip formatter={(value) => formatNumber(value)} labelFormatter={formatDateFromTs} />
             <Line type="monotone" dataKey="value" stroke="#6ba8ff" strokeWidth={2} dot={false} />
           </LineChart>
         </ResponsiveContainer>
@@ -144,7 +176,9 @@ export default function App() {
 
     async function load() {
       try {
-        const response = await fetch(`${API_BASE}/api/dashboard`);
+        const response = await fetch(`${API_BASE}/api/dashboard?_=${Date.now()}`, {
+          cache: "no-store",
+        });
         if (!response.ok) {
           throw new Error(`API request failed (${response.status})`);
         }
@@ -171,7 +205,12 @@ export default function App() {
   const yieldTenors = ["1m", "3m", "6m", "1y", "2y", "5y", "10y", "30y"];
   const yieldCurveData = yieldTenors.map((tenor) => ({ tenor: tenor.toUpperCase(), value: yields[tenor] }));
 
+  function sortPointsByDate(points) {
+    return [...points].sort((a, b) => String(a.date).localeCompare(String(b.date)));
+  }
+
   function filterByTimeline(points) {
+    const sorted = sortPointsByDate(points);
     const now = new Date();
     const start = new Date(now);
     if (timeline === "1M") start.setMonth(now.getMonth() - 1);
@@ -179,27 +218,23 @@ export default function App() {
     if (timeline === "YTD") start.setMonth(0, 1);
     if (timeline === "1Y") start.setFullYear(now.getFullYear() - 1);
     if (timeline === "5Y") start.setFullYear(now.getFullYear() - 5);
-    if (timeline === "ALL") return points;
-    return points.filter((p) => {
+    if (timeline === "ALL") return sorted;
+    return sorted.filter((p) => {
       const date = new Date(p.date);
       return !Number.isNaN(date.getTime()) && date >= start;
     });
   }
 
   const macroCharts = economy.slice(0, 4).map((item) => {
-    const points = (item.history || []).map((h) => ({
-      date: String(h.date),
-      value: Number(h.value),
-    }));
-    return { key: item.series_id, title: item.label, data: filterByTimeline(points) };
+    const raw = normalizeHistoryRows(item.history);
+    const filtered = filterByTimeline(raw);
+    return { key: item.series_id, title: item.label, data: attachTimestamps(filtered) };
   });
 
   const marketCharts = markets.slice(0, 4).map((item) => {
-    const points = (item.history || []).map((h) => ({
-      date: String(h.date),
-      value: Number(h.value),
-    }));
-    return { key: item.symbol, title: item.symbol, data: filterByTimeline(points) };
+    const raw = normalizeHistoryRows(item.history);
+    const filtered = filterByTimeline(raw);
+    return { key: item.symbol, title: item.symbol, data: attachTimestamps(filtered) };
   });
 
   const gdpBars = (globalCompare.gdp_usd_current || []).map((row) => ({
@@ -449,14 +484,21 @@ export default function App() {
               <ResponsiveContainer width="100%" height={420}>
                 <LineChart data={expandedChartData.data}>
                   <CartesianGrid strokeDasharray="3 3" stroke="#223046" />
-                  <XAxis dataKey="date" stroke="#9cb0cb" tickFormatter={formatDateLabel} minTickGap={34} />
+                  <XAxis
+                    dataKey="ts"
+                    type="number"
+                    domain={["dataMin", "dataMax"]}
+                    stroke="#9cb0cb"
+                    tickFormatter={formatDateFromTs}
+                    minTickGap={34}
+                  />
                   <YAxis
                     domain={getDynamicDomain(expandedChartData.data.map((d) => Number(d.value)))}
                     stroke="#9cb0cb"
                     tickFormatter={formatCompact}
                     width={80}
                   />
-                  <Tooltip formatter={(v) => formatNumber(v)} labelFormatter={formatDateLabel} />
+                  <Tooltip formatter={(v) => formatNumber(v)} labelFormatter={formatDateFromTs} />
                   <Line type="monotone" dataKey="value" stroke="#6ba8ff" strokeWidth={2} dot={false} />
                 </LineChart>
               </ResponsiveContainer>

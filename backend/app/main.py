@@ -6,7 +6,7 @@ from xml.etree import ElementTree as ET
 import httpx
 import pandas as pd
 import yfinance as yf
-from fastapi import FastAPI
+from fastapi import FastAPI, Response
 from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI(title="US Economy Live Monitor API", version="0.1.0")
@@ -119,16 +119,59 @@ def _safe_float(value: Any) -> Optional[float]:
         return None
 
 
+def _yf_flatten_columns(df: pd.DataFrame) -> pd.DataFrame:
+    if isinstance(df.columns, pd.MultiIndex):
+        out = df.copy()
+        out.columns = out.columns.get_level_values(0)
+        return out
+    return df
+
+
+def _download_market_daily(symbol: str) -> pd.DataFrame:
+    df = yf.download(
+        symbol,
+        period="max",
+        interval="1d",
+        progress=False,
+        auto_adjust=True,
+        threads=False,
+        group_by="column",
+    )
+    if df.empty:
+        return df
+    df = _yf_flatten_columns(df)
+    if "Close" not in df.columns:
+        return pd.DataFrame()
+    df = df[["Close"]].rename(columns={"Close": "value"}).dropna()
+    df = df.sort_index()
+    idx = pd.DatetimeIndex(pd.to_datetime(df.index))
+    if idx.tz is not None:
+        idx = idx.tz_convert("UTC").tz_localize(None)
+    df.index = idx.normalize()
+    df = df[~df.index.duplicated(keep="last")]
+    df["date"] = df.index.strftime("%Y-%m-%d")
+    return df.reset_index(drop=True)
+
+
 async def fetch_market_snapshot(symbol: str, label: str) -> Dict[str, Any]:
     try:
-        ticker = yf.Ticker(symbol)
-        hist = ticker.history(period="5y", interval="1d")
-        if hist.empty:
-            return {"symbol": symbol, "label": label, "error": "No market data returned"}
+        close_df = _download_market_daily(symbol)
+        if close_df.empty:
+            ticker = yf.Ticker(symbol)
+            hist = ticker.history(period="max", interval="1d", auto_adjust=True, actions=False)
+            if hist.empty:
+                return {"symbol": symbol, "label": label, "error": "No market data returned"}
+            hist = hist.sort_index()
+            close_series_raw = hist["Close"]
+            if isinstance(close_series_raw, pd.DataFrame):
+                close_series_raw = close_series_raw.iloc[:, 0]
+            tmp = pd.DataFrame({"value": close_series_raw}).dropna()
+            idx = pd.DatetimeIndex(pd.to_datetime(tmp.index))
+            if idx.tz is not None:
+                idx = idx.tz_convert("UTC").tz_localize(None)
+            tmp["date"] = idx.strftime("%Y-%m-%d")
+            close_df = tmp.reset_index(drop=True)
 
-        close_df = hist[["Close"]].dropna().copy()
-        close_df["date"] = close_df.index.strftime("%Y-%m-%d")
-        close_df = close_df.rename(columns={"Close": "value"})
         close_series = close_df["value"]
         if close_series.empty:
             return {"symbol": symbol, "label": label, "error": "No close prices available"}
@@ -144,7 +187,8 @@ async def fetch_market_snapshot(symbol: str, label: str) -> Dict[str, Any]:
             "latest": latest_close,
             "change": change,
             "pct_change": pct_change,
-            "history": close_df.tail(1250).to_dict(orient="records"),
+            # Full daily history (e.g. SPY ~8.3k rows since 1993); needed for "ALL" timeline in UI.
+            "history": close_df.to_dict(orient="records"),
         }
     except Exception as exc:
         return {"symbol": symbol, "label": label, "error": str(exc)}
@@ -254,7 +298,8 @@ async def health() -> Dict[str, str]:
 
 
 @app.get("/api/dashboard")
-async def dashboard() -> Dict[str, Any]:
+async def dashboard(response: Response) -> Dict[str, Any]:
+    response.headers["Cache-Control"] = "no-store, max-age=0"
     async with httpx.AsyncClient() as client:
         fred_data: List[Dict[str, Any]] = []
         for _, metadata in FRED_SERIES.items():
