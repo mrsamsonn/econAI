@@ -5,6 +5,7 @@ import {
   CartesianGrid,
   Line,
   LineChart,
+  ReferenceLine,
   ResponsiveContainer,
   Tooltip,
   XAxis,
@@ -430,6 +431,125 @@ function attachTimestamps(points) {
     ...p,
     ts: Date.parse(`${p.date}T12:00:00Z`),
   }));
+}
+
+function buildChangeMap(points, pct = false) {
+  const sorted = [...points].sort((a, b) => String(a.date).localeCompare(String(b.date)));
+  const out = new Map();
+  for (let i = 1; i < sorted.length; i += 1) {
+    const curr = Number(sorted[i].value);
+    const prev = Number(sorted[i - 1].value);
+    if (!Number.isFinite(curr) || !Number.isFinite(prev)) continue;
+    if (pct) {
+      if (prev === 0) continue;
+      out.set(sorted[i].date, ((curr - prev) / prev) * 100);
+    } else {
+      out.set(sorted[i].date, curr - prev);
+    }
+  }
+  return out;
+}
+
+function rollingZMap(points, window = 24) {
+  const sorted = [...points].sort((a, b) => String(a.date).localeCompare(String(b.date)));
+  const out = new Map();
+  for (let i = 0; i < sorted.length; i += 1) {
+    const curr = Number(sorted[i].value);
+    if (!Number.isFinite(curr)) continue;
+    const start = Math.max(0, i - (window - 1));
+    const vals = sorted
+      .slice(start, i + 1)
+      .map((p) => Number(p.value))
+      .filter((v) => Number.isFinite(v));
+    if (vals.length < Math.max(6, Math.floor(window * 0.4))) continue;
+    const mean = vals.reduce((a, b) => a + b, 0) / vals.length;
+    const variance = vals.reduce((acc, v) => acc + (v - mean) ** 2, 0) / vals.length;
+    const std = Math.sqrt(variance);
+    const z = std > 1e-9 ? (curr - mean) / std : 0;
+    out.set(sorted[i].date, Math.max(-3, Math.min(3, z)));
+  }
+  return out;
+}
+
+function buildHistoricalBiasSeries({ payems, unrate, cpi, gdp, spy, vix }) {
+  // Use normalized factor surprises (rolling z) so regimes spread realistically over history.
+  const payemsZ = rollingZMap(Object.fromEntries(buildChangeMap(payems).entries()).size
+    ? payems.map((p, i, arr) => {
+        if (i === 0) return { date: p.date, value: 0 };
+        return { date: p.date, value: Number(p.value) - Number(arr[i - 1].value) };
+      })
+    : payems, 24);
+  const unrateZ = rollingZMap(
+    unrate.map((p, i, arr) => (i === 0 ? { date: p.date, value: 0 } : { date: p.date, value: Number(p.value) - Number(arr[i - 1].value) })),
+    24
+  );
+  const cpiYoYZ = rollingZMap(toYoY(cpi), 24);
+  const gdpZ = rollingZMap(
+    gdp.map((p, i, arr) => (i === 0 ? { date: p.date, value: 0 } : { date: p.date, value: Number(p.value) - Number(arr[i - 1].value) })),
+    12
+  );
+  const spyZ = rollingZMap(
+    spy.map((p, i, arr) => {
+      if (i === 0) return { date: p.date, value: 0 };
+      const prev = Number(arr[i - 1].value);
+      const curr = Number(p.value);
+      return { date: p.date, value: Number.isFinite(prev) && prev !== 0 ? ((curr - prev) / prev) * 100 : 0 };
+    }),
+    24
+  );
+  const vixZ = rollingZMap(
+    vix.map((p, i, arr) => {
+      if (i === 0) return { date: p.date, value: 0 };
+      const prev = Number(arr[i - 1].value);
+      const curr = Number(p.value);
+      return { date: p.date, value: Number.isFinite(prev) && prev !== 0 ? ((curr - prev) / prev) * 100 : 0 };
+    }),
+    24
+  );
+
+  const allDates = Array.from(
+    new Set([
+      ...payemsZ.keys(),
+      ...unrateZ.keys(),
+      ...cpiYoYZ.keys(),
+      ...gdpZ.keys(),
+      ...spyZ.keys(),
+      ...vixZ.keys(),
+    ])
+  ).sort();
+
+  const out = [];
+  for (const date of allDates) {
+    let weighted = 0;
+    let wsum = 0;
+    let signals = 0;
+    const add = (z, weight) => {
+      if (!Number.isFinite(z)) return;
+      weighted += z * weight;
+      wsum += Math.abs(weight);
+      signals += 1;
+    };
+
+    add(payemsZ.get(date), 0.95); // stronger payrolls -> positive
+    add(unrateZ.get(date), -1.05); // higher unemployment -> negative
+    add(cpiYoYZ.get(date), -0.85); // higher inflation shock -> negative
+    add(gdpZ.get(date), 1.1); // stronger real growth -> positive
+    add(spyZ.get(date), 0.8); // risk appetite -> positive
+    add(vixZ.get(date), -0.9); // stress -> negative
+
+    if (signals < 3 || wsum <= 0) continue;
+    const normalized = weighted / wsum;
+    const coverage = signals / 6;
+    // Nonlinear mapping yields richer historical regimes than near-linear +/- few points.
+    const score = 50 + 44 * Math.tanh(normalized * 1.55) * (0.65 + 0.35 * coverage);
+    out.push({
+      date,
+      ts: Date.parse(`${date}T12:00:00Z`),
+      value: Math.max(0, Math.min(100, score)),
+      signals,
+    });
+  }
+  return out;
 }
 
 function toIndex100(points) {
@@ -926,6 +1046,12 @@ export default function App() {
           : ageMs > DATA_REFRESH_MS * 3
             ? "warn"
             : "ok";
+  const biasSnapshotMonth = useMemo(() => {
+    if (!data?.updated_at) return "n/a";
+    const dt = new Date(data.updated_at);
+    if (Number.isNaN(dt.getTime())) return "n/a";
+    return dt.toLocaleDateString(undefined, { month: "short", year: "numeric", timeZone: "UTC" });
+  }, [data?.updated_at]);
 
   const economy = useMemo(() => data?.economy || [], [data]);
   const markets = useMemo(() => data?.markets || [], [data]);
@@ -969,6 +1095,86 @@ export default function App() {
     const filtered = filterByTimeline(raw);
     return { key: item.symbol, title: item.symbol, data: attachTimestamps(filtered) };
   });
+
+  const historicalBiasSeries = useMemo(() => {
+    const e = (sid) => normalizeHistoryRows((economy.find((r) => r.series_id === sid) || {}).history || []);
+    const m = (sym) => normalizeHistoryRows((markets.find((r) => r.symbol === sym) || {}).history || []);
+    const raw = buildHistoricalBiasSeries({
+      payems: e("PAYEMS"),
+      unrate: e("UNRATE"),
+      cpi: e("CPIAUCSL"),
+      gdp: e("GDPC1"),
+      spy: m("SPY"),
+      vix: m("^VIX"),
+    });
+    const filtered = filterByTimeline(raw);
+    if (filtered.length >= 2) return filtered;
+    return raw.slice(-36);
+  }, [economy, markets, timeline]);
+  const historicalBiasDisplaySeries = useMemo(() => {
+    if (!historicalBiasSeries.length) return [];
+    if (!data?.updated_at || !data?.us_economy_direction) return historicalBiasSeries;
+    const now = new Date(data.updated_at);
+    if (Number.isNaN(now.getTime())) return historicalBiasSeries;
+    const monthDate = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+    const monthTs = Date.parse(monthDate.toISOString().slice(0, 10) + "T12:00:00Z");
+    const last = historicalBiasSeries[historicalBiasSeries.length - 1];
+    if (!last || !Number.isFinite(last.ts)) return historicalBiasSeries;
+    if (monthTs <= Number(last.ts)) return historicalBiasSeries;
+    return [
+      ...historicalBiasSeries,
+      {
+        date: monthDate.toISOString().slice(0, 10),
+        ts: monthTs,
+        value: Number(data.us_economy_direction.score),
+        signals: last.signals,
+      },
+    ];
+  }, [historicalBiasSeries, data?.updated_at, data?.us_economy_direction]);
+  const historicalBiasChartSeries = useMemo(() => {
+    if (!historicalBiasDisplaySeries.length) return [];
+    const alpha = 0.34; // EMA smoothing for a cleaner visual trend without changing the underlying score.
+    let prevSmooth = null;
+    return historicalBiasDisplaySeries.map((point) => {
+      const raw = Number(point.value);
+      if (!Number.isFinite(raw)) return { ...point, smoothValue: null };
+      const smooth = prevSmooth == null ? raw : prevSmooth * (1 - alpha) + raw * alpha;
+      prevSmooth = smooth;
+      return {
+        ...point,
+        smoothValue: smooth,
+      };
+    });
+  }, [historicalBiasDisplaySeries]);
+  const historicalBiasSegments = useMemo(() => {
+    if (historicalBiasChartSeries.length < 2) return [];
+    const bandStyle = (value) => {
+      if (value >= 62) return { stroke: "#5fd39a", strokeWidth: 2 };
+      if (value >= 39) return { stroke: "#90a0ba", strokeWidth: 2 };
+      return { stroke: "#e07a7a", strokeWidth: 2 };
+    };
+    const segments = [];
+    for (let i = 1; i < historicalBiasChartSeries.length; i += 1) {
+      const prev = historicalBiasChartSeries[i - 1];
+      const curr = historicalBiasChartSeries[i];
+      const x1 = Number(prev.ts);
+      const x2 = Number(curr.ts);
+      const y1 = Number(prev.smoothValue);
+      const y2 = Number(curr.smoothValue);
+      if (![x1, x2, y1, y2].every(Number.isFinite)) continue;
+      const style = bandStyle((y1 + y2) / 2);
+      segments.push({
+        key: `${x1}-${x2}`,
+        x1,
+        y1,
+        x2,
+        y2,
+        stroke: style.stroke,
+        strokeWidth: style.strokeWidth,
+      });
+    }
+    return segments;
+  }, [historicalBiasChartSeries]);
 
   const extraCharts = useMemo(() => {
     const pick = (rows, seriesId, title) => {
@@ -1086,13 +1292,16 @@ export default function App() {
           {data?.us_economy_direction && (
             <section className={`economy-pulse pulse-${data.us_economy_direction.band || "neutral"}`}>
               <div className="pulse-main">
-                <div className="pulse-score-wrap">
-                  <span className="pulse-score">{formatNumber(data.us_economy_direction.score, 0)}</span>
-                  <span className="pulse-out-of">/ 100</span>
-                </div>
-                <div>
+                <div className="pulse-primary">
+                  <div className="pulse-score-wrap">
+                    <span className="pulse-score">{formatNumber(data.us_economy_direction.score, 0)}</span>
+                    <span className="pulse-out-of">/ 100</span>
+                  </div>
                   <div className="pulse-verdict">{data.us_economy_direction.verdict}</div>
-                  <div className="sub">{data.us_economy_direction.method}</div>
+                </div>
+                <div className="pulse-meta">
+                  <div className="pulse-month">{biasSnapshotMonth}</div>
+                  <div className="sub">Model: Bucketed heuristic with freshness and reliability adjustments</div>
                 </div>
               </div>
               <div className="pulse-bar-outer" aria-hidden>
@@ -1101,6 +1310,47 @@ export default function App() {
                   style={{ width: `${Math.min(100, Math.max(0, Number(data.us_economy_direction.score)))}%` }}
                 />
               </div>
+              {historicalBiasChartSeries.length >= 2 && (
+                <div className="pulse-history-chart">
+                  <div className="sub">
+                    Historical bias trend (monthly snapshot, same heuristic family) · current:{" "}
+                    {formatNumber(data.us_economy_direction.score, 1)}
+                  </div>
+                  <ResponsiveContainer width="100%" height={170}>
+                    <LineChart data={historicalBiasChartSeries}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#223046" />
+                      <XAxis
+                        dataKey="ts"
+                        type="number"
+                        domain={["dataMin", "dataMax"]}
+                        stroke="#9cb0cb"
+                        tick={{ fontSize: 10 }}
+                        tickFormatter={formatDateFromTs}
+                        minTickGap={24}
+                      />
+                      <YAxis domain={[0, 100]} stroke="#9cb0cb" tick={{ fontSize: 10 }} width={46} />
+                      <Tooltip
+                        {...CHART_TOOLTIP_PROPS}
+                        cursor={CHART_LINE_TOOLTIP_CURSOR}
+                        labelFormatter={formatDateFromTs}
+                        formatter={(v, _n, p) => [`${formatNumber(v, 1)} / 100`, `Bias score trend (signals: ${p?.payload?.signals ?? "n/a"})`]}
+                      />
+                      <Line type="monotone" dataKey="smoothValue" stroke="transparent" strokeWidth={0} dot={false} />
+                      {historicalBiasSegments.map((segment) => (
+                        <ReferenceLine
+                          key={segment.key}
+                          segment={[
+                            { x: segment.x1, y: segment.y1 },
+                            { x: segment.x2, y: segment.y2 },
+                          ]}
+                          stroke={segment.stroke}
+                          strokeWidth={segment.strokeWidth}
+                        />
+                      ))}
+                    </LineChart>
+                  </ResponsiveContainer>
+                </div>
+              )}
               <div className="pulse-legend" role="group" aria-label="Economy pulse score bands">
                 <div className="pulse-legend-title">Verdict bands (heuristic score)</div>
                 <ul className="pulse-legend-list">
