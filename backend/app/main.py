@@ -1,6 +1,8 @@
+import re
 from datetime import datetime, timezone
+from html import unescape
 from io import StringIO
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from xml.etree import ElementTree as ET
 
 import httpx
@@ -8,6 +10,7 @@ import pandas as pd
 import yfinance as yf
 from fastapi import FastAPI, Response
 from fastapi.middleware.cors import CORSMiddleware
+from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 
 app = FastAPI(title="US Economy Live Monitor API", version="0.1.0")
 
@@ -69,6 +72,112 @@ HEADLINE_SOURCES: List[Dict[str, str]] = [
     {"name": "Yahoo Finance", "url": "https://finance.yahoo.com/news/rssindex"},
     {"name": "CNBC", "url": "https://www.cnbc.com/id/100003114/device/rss/rss.html"},
     {"name": "Federal Reserve", "url": "https://www.federalreserve.gov/feeds/press_all.xml"},
+]
+
+_VADER = SentimentIntensityAnalyzer()
+
+# RSS `content:encoded` expanded tag (namespaces collapsed by ElementTree).
+_RSS_CONTENT_ENCODED = "{http://purl.org/rss/1.0/modules/content/}encoded"
+_HTML_TAG_RE = re.compile(r"<[^>]+>", re.I)
+
+# Lexicon hits (substring on lowercased title). Keep phrases before single words where order matters.
+_POSITIVE_LEXICON: List[Tuple[str, float]] = [
+    ("beat expectations", 11),
+    ("beats expectations", 11),
+    ("tops expectations", 10),
+    ("better than expected", 11),
+    ("better-than-expected", 11),
+    ("earnings beat", 9),
+    ("profit beat", 9),
+    ("record high", 8),
+    ("record close", 8),
+    ("all-time high", 8),
+    ("gdp growth", 10),
+    ("economic growth", 9),
+    ("job gains", 10),
+    ("added jobs", 10),
+    ("hiring", 6),
+    ("unemployment falls", 10),
+    ("unemployment fell", 10),
+    ("unemployment drops", 10),
+    ("inflation cools", 12),
+    ("inflation cooled", 12),
+    ("inflation eases", 12),
+    ("inflation eased", 12),
+    ("disinflation", 11),
+    ("cooling inflation", 11),
+    ("rate cut", 7),
+    ("rate cuts", 8),
+    ("cuts rates", 8),
+    ("dovish", 6),
+    ("soft landing", 9),
+    ("rally", 6),
+    ("surges", 5),
+    ("soars", 5),
+    ("jumped", 4),
+    ("gains", 4),
+    ("rebound", 6),
+    ("recovery", 7),
+    ("upgrade", 7),
+    ("breakthrough", 6),
+    ("trade deal", 6),
+    ("ceasefire", 5),
+    ("peace talks", 4),
+    ("productivity", 5),
+    ("expansion", 7),
+    ("resilient", 5),
+]
+
+_NEGATIVE_LEXICON: List[Tuple[str, float]] = [
+    ("layoffs", 12),
+    ("job cuts", 12),
+    ("cuts jobs", 12),
+    ("job losses", 12),
+    ("unemployment rises", 11),
+    ("unemployment rose", 11),
+    ("unemployment jumps", 11),
+    ("recession", 14),
+    ("contraction", 11),
+    ("downgrade", 9),
+    ("default", 10),
+    ("bankruptcy", 11),
+    ("crisis", 9),
+    ("crash", 11),
+    ("plunge", 9),
+    ("plunges", 9),
+    ("slump", 8),
+    ("turmoil", 8),
+    ("strikes", 7),
+    ("shutdown", 8),
+    ("fears", 6),
+    ("warning", 7),
+    ("worse than expected", 11),
+    ("misses expectations", 11),
+    ("disappoints", 8),
+    ("disappointment", 8),
+    ("inflation surges", 13),
+    ("inflation soars", 13),
+    ("inflation jumps", 12),
+    ("inflation spikes", 12),
+    ("hot cpi", 12),
+    ("prices soar", 10),
+    ("price surge", 10),
+    ("hawkish", 6),
+    ("higher for longer", 8),
+    ("rate hikes", 7),
+    ("tariff", 6),
+    ("war risk", 9),
+    ("geopolitical", 5),
+    ("demand concerns", 7),
+    ("demand worries", 7),
+    ("growth worries", 8),
+    ("markets slide", 8),
+    ("stocks slide", 8),
+    ("oil surges", 9),
+    ("crude surges", 9),
+    ("oil spikes", 8),
+    ("yield spike", 7),
+    ("bond vigilante", 8),
 ]
 
 
@@ -224,23 +333,175 @@ async def fetch_avg_interest_rates(client: httpx.AsyncClient) -> Dict[str, Any]:
         return {"error": str(exc)}
 
 
-def classify_headline(title: str) -> Dict[str, str]:
-    text = title.lower()
-    if any(k in text for k in ["inflation", "prices rise", "hot cpi", "overheat"]):
-        return {"impact_area": "Inflation", "direction": "negative", "color": "red"}
-    if any(k in text for k in ["layoffs", "unemployment", "job cuts", "claims rise"]):
-        return {"impact_area": "Labor Market", "direction": "negative", "color": "red"}
-    if any(k in text for k in ["gdp growth", "job gains", "productivity", "soft landing"]):
-        return {"impact_area": "Growth", "direction": "positive", "color": "green"}
-    if any(k in text for k in ["oil", "crude", "shipping", "freight", "hormuz"]):
-        return {"impact_area": "Energy/Supply", "direction": "mixed", "color": "yellow"}
-    if any(k in text for k in ["fed", "rates", "treasury", "bond yields"]):
-        return {"impact_area": "Monetary Policy", "direction": "mixed", "color": "yellow"}
-    return {"impact_area": "General Macro", "direction": "mixed", "color": "yellow"}
+def _plain_text(html_or_text: str) -> str:
+    """Strip tags / entities from RSS description or content:encoded."""
+    if not html_or_text:
+        return ""
+    s = unescape(str(html_or_text))
+    s = _HTML_TAG_RE.sub(" ", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
 
 
-async def fetch_headlines(client: httpx.AsyncClient) -> List[Dict[str, str]]:
-    results: List[Dict[str, str]] = []
+def _rss_element_raw_text(el: Optional[ET.Element]) -> str:
+    if el is None:
+        return ""
+    return "".join(el.itertext()).strip()
+
+
+def _rss_item_body_plain(item: ET.Element) -> str:
+    """Plain-text body from RSS description and/or content:encoded (deduped)."""
+    blobs: List[str] = []
+    for el in (item.find("description"), item.find(_RSS_CONTENT_ENCODED)):
+        raw = _rss_element_raw_text(el)
+        if not raw:
+            continue
+        plain = _plain_text(raw)
+        if plain and plain not in blobs:
+            blobs.append(plain)
+    return "\n\n".join(blobs).strip()
+
+
+def _sentiment_corpus(title: str, body_plain: str, max_chars: int = 8000) -> str:
+    """Title + article snippet for VADER (truncated to keep requests predictable)."""
+    t = (title or "").strip()
+    b = (body_plain or "").strip()
+    if t and b:
+        blob = f"{t}\n\n{b}"
+    elif t:
+        blob = t
+    elif b:
+        blob = b
+    else:
+        return ""
+    blob = blob.strip()
+    if len(blob) <= max_chars:
+        return blob
+    return blob[:max_chars].rstrip()
+
+
+def _lexicon_impact(text: str) -> float:
+    impact = 0.0
+    for phrase, weight in _POSITIVE_LEXICON:
+        if phrase in text:
+            impact += weight
+    for phrase, weight in _NEGATIVE_LEXICON:
+        if phrase in text:
+            impact -= weight
+    return impact
+
+
+def _detect_impact_area(text: str) -> str:
+    if any(
+        k in text
+        for k in ["inflation", "cpi", "pce", "consumer prices", "producer price", "cost of living"]
+    ):
+        return "Inflation"
+    if any(
+        k in text
+        for k in ["layoff", "employ", "jobs", "payroll", "wages", "unemployment", "claims", "nfp"]
+    ):
+        return "Labor Market"
+    if any(k in text for k in ["gdp", "growth", "recession", "expansion", "economy shrinks", "economic output"]):
+        return "Growth"
+    if any(k in text for k in ["oil", "crude", "opec", "shipping", "freight", "supply chain", "energy"]):
+        return "Energy/Supply"
+    if any(
+        k in text
+        for k in ["fed", "fomc", "interest rate", "rates", "treasury", "bond yield", "yields", "dollar index"]
+    ):
+        return "Monetary Policy"
+    return "General Macro"
+
+
+def _domain_bias(text: str) -> float:
+    """
+    Signed priors for typical US macro / risk framing (not a forecast).
+    Pushes bland headlines toward a side when domain verbs are clear.
+    """
+    bias = 0.0
+    if "inflation" in text or "cpi" in text or "pce" in text:
+        if any(
+            x in text
+            for x in ("surge", "soar", "jump", "spike", "hot", "reaccelerat", "sticky", "persistent high")
+        ):
+            bias -= 11.0
+        elif any(
+            x in text
+            for x in ("cool", "cooling", "ease", "easing", "fall", "fell", "slow", "disinflat", "decline", "subdued")
+        ):
+            bias += 9.0
+    if any(x in text for x in ("layoff", "job cut", "cuts jobs", "job losses")):
+        bias -= 10.0
+    elif any(x in text for x in ("job gains", "hiring", "added jobs", "unemployment fall", "unemployment drop")):
+        bias += 8.0
+    if any(x in text for x in ("recession", "contraction", "shrinks", "slumps")):
+        bias -= 12.0
+    if any(x in text for x in ("expansion", "gdp growth", "accelerat")):
+        bias += 8.0
+    if "oil" in text or "crude" in text or "gasoline" in text:
+        if any(x in text for x in ("demand concern", "demand worry", "oversupply", "glut")):
+            bias -= 6.0
+        if any(x in text for x in ("surge", "soar", "spike", "jump", "rally")):
+            bias -= 7.0
+        if any(x in text for x in ("fall", "fell", "drop", "plunge", "tumble")):
+            bias += 5.0
+    if any(x in text for x in ("rate cut", "cuts rates", "easing", "dovish")):
+        bias += 6.0
+    if any(x in text for x in ("rate hike", "hikes rates", "hawkish", "higher for longer")):
+        bias -= 6.0
+    return bias
+
+
+def classify_headline(title: str, body_plain: str = "") -> Dict[str, Any]:
+    """
+    Rule-based topic + VADER sentiment + domain biases -> direction/color.
+    Lexicon/domain use title + body; VADER runs on title + plain-text RSS body (description / content:encoded).
+    """
+    raw_title = (title or "").strip()
+    body = (body_plain or "").strip()
+    combined_lower = f"{raw_title}\n{body}".lower().strip()
+    if not combined_lower:
+        return {
+            "impact_area": "General Macro",
+            "direction": "mixed",
+            "color": "yellow",
+            "sentiment_compound": 0.0,
+            "impact_score": 0.0,
+        }
+
+    sentiment_blob = _sentiment_corpus(raw_title, body)
+    compound = float(_VADER.polarity_scores(sentiment_blob)["compound"])
+    lex = _lexicon_impact(combined_lower)
+    dom_bias = _domain_bias(combined_lower)
+    area = _detect_impact_area(combined_lower)
+
+    # Lexicon/domain carry most signal; VADER uses headline + article snippet from the feed.
+    impact_score = compound * 42.0 + lex + dom_bias
+
+    pos_cut, neg_cut = 4.5, -4.5
+    if impact_score >= pos_cut:
+        direction, color = "positive", "green"
+    elif impact_score <= neg_cut:
+        direction, color = "negative", "red"
+    elif compound >= 0.15:
+        direction, color = "positive", "green"
+    elif compound <= -0.15:
+        direction, color = "negative", "red"
+    else:
+        direction, color = "mixed", "yellow"
+
+    return {
+        "impact_area": area,
+        "direction": direction,
+        "color": color,
+        "sentiment_compound": round(compound, 4),
+        "impact_score": round(impact_score, 2),
+    }
+
+
+async def fetch_headlines(client: httpx.AsyncClient) -> List[Dict[str, Any]]:
+    results: List[Dict[str, Any]] = []
     for source in HEADLINE_SOURCES:
         try:
             response = await client.get(
@@ -257,7 +518,8 @@ async def fetch_headlines(client: httpx.AsyncClient) -> List[Dict[str, str]]:
                 pub_date = (item.findtext("pubDate") or "").strip()
                 if not title:
                     continue
-                classification = classify_headline(title)
+                body_plain = _rss_item_body_plain(item)
+                classification = classify_headline(title, body_plain)
                 results.append(
                     {
                         "source": source["name"],

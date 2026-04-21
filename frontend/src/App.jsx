@@ -11,7 +11,18 @@ import {
   YAxis,
 } from "recharts";
 
-const API_BASE = import.meta.env.VITE_API_BASE || "http://127.0.0.1:8000";
+/**
+ * When unset in dev, use same-origin `/api/...` so Vite can proxy to the backend (see vite.config.js).
+ * `./run.sh` sets VITE_API_BASE to the real backend port — then we call that URL directly.
+ * Production builds without env fall back to localhost:8000 unless you set VITE_API_BASE at build time.
+ */
+const _viteApi = import.meta.env.VITE_API_BASE;
+const API_BASE =
+  typeof _viteApi === "string" && _viteApi.trim() !== ""
+    ? _viteApi.trim().replace(/\/$/, "")
+    : import.meta.env.DEV
+      ? ""
+      : "http://127.0.0.1:8000";
 const STATUS_TICK_MS = 1_000;
 /** One dashboard pull hits many upstream URLs (FRED CSV, Yahoo, RSS). Keep a safe floor. */
 const MIN_DATA_REFRESH_MS = 60_000;
@@ -21,6 +32,7 @@ const DATA_REFRESH_MS =
   Number.isFinite(_refreshParsed) && _refreshParsed > 0
     ? Math.min(MAX_DATA_REFRESH_MS, Math.max(MIN_DATA_REFRESH_MS, _refreshParsed))
     : MIN_DATA_REFRESH_MS;
+const EMPTY_HEADLINES = [];
 const TIMELINE_OPTIONS = ["1M", "3M", "YTD", "1Y", "5Y", "ALL"];
 const METRIC_PREFERENCE = {
   CPIAUCSL: "Lower is generally better",
@@ -226,17 +238,17 @@ function DashboardSkeleton() {
         <section className="card card-headlines">
           <div className="sk sk-card-title sk-w-long" />
           <div className="sk sk-line sk-line-sub" />
-          <div className="skeleton-headlines">
-            {[1, 2, 3, 4, 5, 6].map((i) => (
-              <div key={i} className="skeleton-headline-row">
-                <div className="skeleton-headline-main">
-                  <div className="sk sk-line sk-line-headline-a" />
-                  <div className="sk sk-line sk-line-headline-b" />
-                </div>
-                <div className="skeleton-headline-tags">
-                  <div className="sk sk-tag" />
-                  <div className="sk sk-tag sk-tag-wide" />
-                </div>
+          <div className="skeleton-headlines-columns">
+            {[1, 2, 3].map((col) => (
+              <div key={col} className="skeleton-headlines-col">
+                <div className="sk sk-headlines-col-title" />
+                {[1, 2, 3].map((row) => (
+                  <div key={row} className="skeleton-headline-block">
+                    <div className="sk sk-line sk-line-headline-a" />
+                    <div className="sk sk-line sk-line-headline-b" />
+                    <div className="sk sk-tag sk-tag-wide sk-headline-block-tag" />
+                  </div>
+                ))}
               </div>
             ))}
           </div>
@@ -341,6 +353,87 @@ function sentimentClass(color) {
   return "sentiment yellow";
 }
 
+function headlineScoreTip(h) {
+  const score = h.impact_score;
+  const compound = h.sentiment_compound;
+  if (typeof score !== "number" && typeof compound !== "number") return undefined;
+  const parts = [];
+  if (typeof score === "number") parts.push(`impact score ${score}`);
+  if (typeof compound === "number") parts.push(`VADER compound ${compound}`);
+  return parts.length ? parts.join(" · ") : undefined;
+}
+
+/** Map API headline to a 3-column impact bucket (backend uses `mixed` for neutral). */
+function headlineImpactBucket(h) {
+  const d = String(h.direction || "").toLowerCase();
+  if (d === "positive") return "positive";
+  if (d === "negative") return "negative";
+  if (d === "mixed" || d === "neutral") return "neutral";
+  const c = String(h.color || "").toLowerCase();
+  if (c === "green") return "positive";
+  if (c === "red") return "negative";
+  return "neutral";
+}
+
+function HeadlinesByImpact({ headlines }) {
+  const buckets = useMemo(() => {
+    const positive = [];
+    const neutral = [];
+    const negative = [];
+    for (const h of headlines) {
+      const b = headlineImpactBucket(h);
+      if (b === "positive") positive.push(h);
+      else if (b === "negative") negative.push(h);
+      else neutral.push(h);
+    }
+    return { positive, neutral, negative };
+  }, [headlines]);
+
+  const columns = [
+    { id: "positive", title: "Positive impact", tone: "positive", items: buckets.positive },
+    { id: "neutral", title: "Neutral / mixed", tone: "neutral", items: buckets.neutral },
+    { id: "negative", title: "Negative impact", tone: "negative", items: buckets.negative },
+  ];
+
+  return (
+    <div className="headlines-by-impact">
+      {columns.map((col) => (
+        <section key={col.id} className={`headlines-col headlines-col--${col.tone}`} aria-label={col.title}>
+          <div className="headlines-col-head">
+            <h4 className="headlines-col-heading">{col.title}</h4>
+            <span className="headlines-col-count">{col.items.length}</span>
+          </div>
+          <div className="headlines-col-list">
+            {col.items.length === 0 ? (
+              <p className="headlines-empty">No headlines in this bucket.</p>
+            ) : (
+              col.items.map((h) => (
+                <article key={`${h.source}-${h.url}-${h.title}`} className="headline-item">
+                  <a
+                    href={h.url}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="headline-link"
+                    title={headlineScoreTip(h)}
+                  >
+                    {h.title}
+                  </a>
+                  <div className="sub">
+                    {h.source} · {h.published_at || "n/a"}
+                  </div>
+                  <div className="headline-tags">
+                    <span className="tag">{h.impact_area}</span>
+                  </div>
+                </article>
+              ))
+            )}
+          </div>
+        </section>
+      ))}
+    </div>
+  );
+}
+
 function formatSyncAge(msAgo) {
   if (msAgo == null || Number.isNaN(msAgo)) return "";
   if (msAgo < 1500) return "just now";
@@ -402,7 +495,16 @@ export default function App() {
         setError("");
         setLastSyncAt(Date.now());
       } catch (err) {
-        setError(err.message || "Failed to load dashboard");
+        const raw = err?.message || "Failed to load dashboard";
+        const isNetwork =
+          raw === "Failed to fetch" ||
+          raw === "Load failed" ||
+          raw.includes("NetworkError") ||
+          raw.toLowerCase().includes("fetch");
+        const hint = isNetwork
+          ? " Start the FastAPI backend (e.g. ./run.sh), or run it on port 8000 if you use npm run dev without VITE_API_BASE."
+          : "";
+        setError(raw + hint);
       } finally {
         setLoading(false);
       }
@@ -434,7 +536,7 @@ export default function App() {
   const markets = useMemo(() => data?.markets || [], [data]);
   const yields = data?.treasury_yields || {};
   const globalCompare = data?.global_compare || {};
-  const headlines = data?.headlines || [];
+  const headlines = data?.headlines ?? EMPTY_HEADLINES;
   const yieldTenors = ["1m", "3m", "6m", "1y", "2y", "5y", "10y", "30y"];
   const yieldCurveData = yieldTenors.map((tenor) => ({ tenor: tenor.toUpperCase(), value: yields[tenor] }));
 
@@ -800,26 +902,11 @@ export default function App() {
       <section className="below-section">
         <Card title="Macro Headlines (Rule-Labeled Impact)" className="card-headlines">
           <p className="sub">
-            Labels are transparent, rule-based tags from headline text (not opaque AI sentiment).
+            VADER runs on the headline plus plain text from the RSS item (description / content:encoded); keywords and
+            domain priors use that same text. Hover a headline for impact score and compound. Topic tags are
+            keyword-derived.
           </p>
-          <div className="rows">
-            {headlines.map((h) => (
-              <div key={`${h.source}-${h.url}-${h.title}`} className="headline-row">
-                <div>
-                  <a href={h.url} target="_blank" rel="noreferrer" className="headline-link">
-                    {h.title}
-                  </a>
-                  <div className="sub">
-                    {h.source} | {h.published_at || "n/a"}
-                  </div>
-                </div>
-                <div className="headline-tags">
-                  <span className={sentimentClass(h.color)}>{h.direction}</span>
-                  <span className="tag">{h.impact_area}</span>
-                </div>
-              </div>
-            ))}
-          </div>
+          <HeadlinesByImpact headlines={headlines} />
         </Card>
       </section>
         </>

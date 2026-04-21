@@ -4,3 +4,4 @@ httpx
 pandas
 yfinance
 python-dateutil
+vaderSentiment
